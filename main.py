@@ -40,7 +40,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -1035,6 +1035,10 @@ if (Test-Path -LiteralPath $targetPath) {{
 Move-Item -LiteralPath $downloadedPath -Destination $targetPath -Force
 $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
 Get-ChildItem Env:_PYI_* -ErrorAction SilentlyContinue | Remove-Item -ErrorAction SilentlyContinue
+$ie4uinitPath = Join-Path (Join-Path $env:SystemRoot 'System32') 'ie4uinit.exe'
+if (Test-Path -LiteralPath $ie4uinitPath) {{
+    Start-Process -FilePath $ie4uinitPath -ArgumentList '-show' -WindowStyle Hidden -ErrorAction SilentlyContinue
+}}
 Start-Process -FilePath $targetPath
 Start-Sleep -Seconds 2
 Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
@@ -1257,9 +1261,12 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 
     def format_duration(self, total_seconds):
         total_seconds = max(0, int(total_seconds))
-        hours, remainder = divmod(total_seconds, 3600)
+        days, remainder = divmod(total_seconds, 86400)
+        hours, remainder = divmod(remainder, 3600)
         minutes, seconds = divmod(remainder, 60)
         parts = []
+        if days:
+            parts.append(f"{days}D")
         if hours:
             parts.append(f"{hours}H")
         if minutes:
@@ -1267,6 +1274,17 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
         if seconds or not parts:
             parts.append(f"{seconds}S")
         return " ".join(parts)
+
+    def format_last_rain_detected(self):
+        if not self.last_rain_time or self.last_rain_time == "--":
+            return "--"
+
+        try:
+            detected_at = datetime.strptime(self.last_rain_time, "%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            return str(self.last_rain_time)
+
+        return detected_at.strftime("%I:%M %p").lstrip("0").lower()
 
     def format_rain_amount(self, amount):
         try:
@@ -2462,7 +2480,7 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
                             self.format_rain_amount_per_hour(self.get_average_rain_collected_per_hour()),
                         ),
                         ("Last Rain Reward", self.format_rain_amount(self.last_rain_reward)),
-                        ("Last Rain Detected", self.last_rain_time),
+                        ("Last Rain Detected", self.format_last_rain_detected()),
                     ],
                 ),
                 (
