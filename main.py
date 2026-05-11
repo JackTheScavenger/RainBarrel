@@ -29,10 +29,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= TO-DO =================
 # Rain page animations
 # Bot to decide best skin to withdraw
-# Site stats | make graph of rain amount over time of day, max time/min time between rains
-# 
 # Collect rain without having the website up or your cursor moved at all
-# Push updates to people
 # Password system/accounts which i activate
 # Free battle joiner
 # Discount battle joiner
@@ -42,7 +39,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
