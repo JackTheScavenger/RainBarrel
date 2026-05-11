@@ -9,6 +9,7 @@ from PyInstaller.utils.hooks import collect_submodules
 python_root = sys.base_prefix
 python_dlls = os.path.join(python_root, 'DLLs')
 python_tcl = os.path.join(python_root, 'tcl')
+system32 = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32')
 
 
 def keep_runtime_module(name):
@@ -35,10 +36,40 @@ hiddenimports = (
 )
 
 
+def collect_existing_binaries(names, search_roots):
+    binaries = []
+    seen = set()
+
+    for name in names:
+        for root in search_roots:
+            path = os.path.join(root, name)
+            key = os.path.normcase(os.path.abspath(path))
+            if key in seen or not os.path.exists(path):
+                continue
+
+            binaries.append((path, '.'))
+            seen.add(key)
+            break
+
+    return binaries
+
+
+runtime_binaries = collect_existing_binaries(
+    [
+        f'python{sys.version_info.major}{sys.version_info.minor}.dll',
+        'vcruntime140.dll',
+        'vcruntime140_1.dll',
+        'msvcp140.dll',
+        'concrt140.dll',
+    ],
+    [python_root, python_dlls, system32],
+)
+
+
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[
+    binaries=runtime_binaries + [
         (os.path.join(python_dlls, '_tkinter.pyd'), '.'),
         (os.path.join(python_dlls, 'tcl86t.dll'), '.'),
         (os.path.join(python_dlls, 'tk86t.dll'), '.'),
