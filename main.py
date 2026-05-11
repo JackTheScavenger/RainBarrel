@@ -39,7 +39,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
