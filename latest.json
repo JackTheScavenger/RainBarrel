@@ -1,6 +1,6 @@
 {
-  "version": "1.0.2",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.0.2/RainBarrel.exe",
-  "sha256": "2d3aea163a7ed00adbc7a07b342249a236f3cae5f31e16887b46cbad16ddd9c1",
-  "notes": "Release 1.0.2 with bundled runtime DLLs"
+  "version": "1.0.3",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.0.3/RainBarrel.exe",
+  "sha256": "46641302ede644cce20030e0164edb40da6e3c83a9f975ad4a0a773344896ae0",
+  "notes": "Release 1.0.3"
 }
