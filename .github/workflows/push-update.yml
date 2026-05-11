@@ -1,13 +1,7 @@
 name: Build and publish update
 
 on:
-  push:
-    branches:
-      - main
-      - master
-    paths-ignore:
-      - latest.json
-      - README.md
+  workflow_dispatch:
 
 permissions:
   contents: write

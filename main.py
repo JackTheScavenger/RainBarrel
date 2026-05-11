@@ -40,7 +40,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -686,6 +686,7 @@ class App(ctk.CTk):
         self.weather_station_warn_before_open = ctk.BooleanVar(
             value=saved_settings.get("weather_station_warn_before_open", True)
         )
+        self.rain_chart_mode = ctk.StringVar(value=saved_settings.get("rain_chart_mode", "Bar"))
         self.weather_station_enabled = ctk.BooleanVar(value=False)
         self.weather_station_active = False
         self.advanced_settings_enabled = ctk.BooleanVar(value=False)
@@ -1095,6 +1096,7 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
             "weather_station_interval": int(self.weather_station_interval.get()),
             "weather_notification_volume": int(self.weather_notification_volume.get()),
             "weather_station_warn_before_open": bool(self.weather_station_warn_before_open.get()),
+            "rain_chart_mode": self.get_rain_chart_mode(),
         }
 
     def get_current_stats(self):
@@ -1274,6 +1276,15 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
             return str(int(amount))
         return f"{amount:.2f}"
 
+    def get_average_rain_collected_per_hour(self):
+        active_hours = self.get_total_search_time_seconds() / 3600
+        if active_hours <= 0:
+            return 0.0
+        return self.total_rain_collected / active_hours
+
+    def format_rain_amount_per_hour(self, amount):
+        return f"{self.format_rain_amount(amount)}/H"
+
     def get_hourly_rain_totals(self):
         hourly_sums = [0.0] * 24
         hourly_counts = [0] * 24
@@ -1305,6 +1316,34 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
             display_hour = 12
         return f"{display_hour}{suffix}"
 
+    def get_rain_chart_mode(self):
+        mode = self.rain_chart_mode.get()
+        if mode not in ("Bar", "Line"):
+            mode = "Bar"
+            self.rain_chart_mode.set(mode)
+        return mode
+
+    def set_rain_chart_mode(self, mode):
+        if mode not in ("Bar", "Line"):
+            mode = "Bar"
+
+        self.rain_chart_mode.set(mode)
+        self.save_data()
+        if self.hourly_chart_canvas is not None:
+            self.draw_hourly_rain_chart(self.hourly_chart_canvas)
+
+    def get_hourly_rain_averages(self):
+        totals, counts = self.get_hourly_rain_totals()
+        averages = []
+
+        for hour in range(24):
+            if counts[hour]:
+                averages.append(totals[hour] / counts[hour])
+            else:
+                averages.append(None)
+
+        return averages
+
     def build_hourly_rain_chart(self, parent):
         card = ctk.CTkFrame(
             parent,
@@ -1317,13 +1356,35 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 
         ctk.CTkLabel(
             card,
-            text="RAIN COLLECTED BY HOUR",
+            text="AVERAGE RAIN COLLECTED BY HOUR",
             text_color=COLORS["red2"],
             font=ctk.CTkFont(family="Impact", size=26),
         ).pack(anchor="w", padx=26, pady=(18, 10))
 
-        totals, counts = self.get_hourly_rain_totals()
-        populated_values = [value for value in totals if value > 0]
+        mode_row = ctk.CTkFrame(card, fg_color="transparent")
+        mode_row.pack(fill="x", padx=26, pady=(0, 10))
+
+        ctk.CTkLabel(
+            mode_row,
+            text="GRAPH",
+            text_color=COLORS["muted"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(side="left")
+
+        ctk.CTkSegmentedButton(
+            mode_row,
+            values=["Bar", "Line"],
+            variable=self.rain_chart_mode,
+            command=self.set_rain_chart_mode,
+            selected_color=COLORS["red"],
+            selected_hover_color="#b83928",
+            unselected_color="#1b1f1a",
+            unselected_hover_color="#2a241f",
+            text_color=COLORS["text"],
+        ).pack(side="right")
+
+        averages = self.get_hourly_rain_averages()
+        populated_values = [value for value in averages if value is not None]
 
         if not populated_values:
             ctk.CTkLabel(
@@ -1352,8 +1413,8 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
         except Exception:
             return
 
-        totals, counts = self.get_hourly_rain_totals()
-        populated_values = [value for value in totals if value > 0]
+        averages = self.get_hourly_rain_averages()
+        populated_values = [value for value in averages if value is not None]
         if not populated_values:
             return
 
@@ -1374,7 +1435,9 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
         label_color = COLORS["muted"]
         bar_color = COLORS["red2"]
         muted_bar = "#2a201d"
+        line_color = COLORS["green"]
         baseline_y = canvas_height - bottom_pad
+        mode = self.get_rain_chart_mode()
 
         canvas.create_line(left_pad, top_pad, left_pad, baseline_y, fill=axis_color, width=1)
         canvas.create_line(
@@ -1394,39 +1457,33 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
             font=("Segoe UI", 8),
         )
 
-        for index, total in enumerate(totals):
+        line_points = []
+
+        for index, average in enumerate(averages):
             x0 = left_pad + index * slot_width + max(2, slot_width * 0.12)
             x1 = left_pad + (index + 1) * slot_width - max(2, slot_width * 0.12)
             center_x = (x0 + x1) / 2
 
-            if total > 0:
-                bar_height = max(5, (total / max_value) * chart_height)
+            if average is not None:
+                bar_height = max(5, (average / max_value) * chart_height)
                 y0 = baseline_y - bar_height
-                fill = bar_color
+                line_points.append((center_x, y0, average))
+                if mode == "Bar":
+                    canvas.create_rectangle(x0, y0, x1, baseline_y, fill=bar_color, outline="")
             else:
                 bar_height = 3
                 y0 = baseline_y - bar_height
-                fill = muted_bar
+                if mode == "Bar":
+                    canvas.create_rectangle(x0, y0, x1, baseline_y, fill=muted_bar, outline="")
 
-            canvas.create_rectangle(x0, y0, x1, baseline_y, fill=fill, outline="")
-
-            if total > 0:
+            if mode == "Bar" and average is not None:
                 canvas.create_text(
                     center_x,
                     max(top_pad + 8, y0 - 11),
-                    text=self.format_rain_amount(total),
+                    text=self.format_rain_amount(average),
                     fill=COLORS["text"],
                     font=("Segoe UI", 9, "bold"),
                 )
-
-                if counts[index] > 1:
-                    canvas.create_text(
-                        center_x,
-                        min(baseline_y + 16, canvas_height - 34),
-                        text=f"{counts[index]}x",
-                        fill=label_color,
-                        font=("Segoe UI", 8),
-                    )
 
             if index % 3 == 0 or index == 23:
                 canvas.create_text(
@@ -1435,6 +1492,36 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
                     text=self.format_hour_label(index),
                     fill=label_color,
                     font=("Segoe UI", 8),
+                )
+
+        if mode == "Line" and line_points:
+            for first, second in zip(line_points, line_points[1:]):
+                canvas.create_line(
+                    first[0],
+                    first[1],
+                    second[0],
+                    second[1],
+                    fill=line_color,
+                    width=3,
+                    smooth=True,
+                )
+
+            for center_x, y, average in line_points:
+                canvas.create_oval(
+                    center_x - 4,
+                    y - 4,
+                    center_x + 4,
+                    y + 4,
+                    fill=COLORS["red2"],
+                    outline=COLORS["text"],
+                    width=1,
+                )
+                canvas.create_text(
+                    center_x,
+                    max(top_pad + 8, y - 13),
+                    text=self.format_rain_amount(average),
+                    fill=COLORS["text"],
+                    font=("Segoe UI", 9, "bold"),
                 )
 
     def reset_stats(self):
@@ -2368,6 +2455,10 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
                         ("Total Active Time", self.format_duration(self.get_total_search_time_seconds())),
                         ("Total Rains Clicked", str(self.total_rains_clicked)),
                         ("Total Rain Collected", self.format_rain_amount(self.total_rain_collected)),
+                        (
+                            "Average Rain Per Hour",
+                            self.format_rain_amount_per_hour(self.get_average_rain_collected_per_hour()),
+                        ),
                         ("Last Rain Reward", self.format_rain_amount(self.last_rain_reward)),
                         ("Last Rain Detected", self.last_rain_time),
                     ],
