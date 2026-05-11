@@ -40,7 +40,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -1022,27 +1022,74 @@ class App(ctk.CTk):
 $ErrorActionPreference = 'Stop'
 $processId = {os.getpid()}
 $targetPath = {powershell_quote(target_path)}
+$targetDir = Split-Path -Parent $targetPath
 $downloadedPath = {powershell_quote(downloaded_path)}
 $backupPath = "$targetPath.bak"
-Wait-Process -Id $processId -ErrorAction SilentlyContinue
-Start-Sleep -Milliseconds 500
-if (Test-Path -LiteralPath $backupPath) {{
+$logPath = Join-Path (Split-Path -Parent $PSCommandPath) 'update.log'
+
+function Write-UpdateLog($message) {{
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    Add-Content -LiteralPath $logPath -Value "[$timestamp] $message"
+}}
+
+function Invoke-WithRetry($description, [scriptblock]$action) {{
+    for ($attempt = 1; $attempt -le 20; $attempt++) {{
+        try {{
+            & $action
+            return
+        }} catch {{
+            if ($attempt -eq 20) {{
+                throw
+            }}
+            Write-UpdateLog "$description failed on attempt ${attempt}: $($_.Exception.Message)"
+            Start-Sleep -Milliseconds 500
+        }}
+    }}
+}}
+
+try {{
+    Write-UpdateLog "Updater started"
+    $deadline = (Get-Date).AddSeconds(20)
+    while ((Get-Process -Id $processId -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)) {{
+        Start-Sleep -Milliseconds 250
+    }}
+    if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {{
+        Write-UpdateLog "Old app process $processId did not exit; stopping it"
+        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    }}
+    if (Test-Path -LiteralPath $backupPath) {{
+        Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+    }}
+    if (Test-Path -LiteralPath $targetPath) {{
+        Invoke-WithRetry "Backing up current exe" {{ Move-Item -LiteralPath $targetPath -Destination $backupPath -Force }}
+    }}
+    Invoke-WithRetry "Installing downloaded exe" {{ Move-Item -LiteralPath $downloadedPath -Destination $targetPath -Force }}
+
+    $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
+    Get-ChildItem Env:_PYI_* -ErrorAction SilentlyContinue | Remove-Item -ErrorAction SilentlyContinue
+    $ie4uinitPath = Join-Path (Join-Path $env:SystemRoot 'System32') 'ie4uinit.exe'
+    if (Test-Path -LiteralPath $ie4uinitPath) {{
+        Start-Process -FilePath $ie4uinitPath -ArgumentList '-show' -WindowStyle Hidden -ErrorAction SilentlyContinue
+    }}
+    Write-UpdateLog "Starting updated app"
+    $startedProcess = Start-Process -FilePath $targetPath -WorkingDirectory $targetDir -PassThru
+    Start-Sleep -Seconds 3
+    if ($startedProcess.HasExited) {{
+        Write-UpdateLog "Direct start exited with code $($startedProcess.ExitCode); trying explorer fallback"
+        Start-Process -FilePath 'explorer.exe' -ArgumentList $targetPath
+    }} else {{
+        Write-UpdateLog "Started process id $($startedProcess.Id)"
+    }}
     Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+    Write-UpdateLog "Updater completed"
+    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+}} catch {{
+    Write-UpdateLog "Updater failed: $($_.Exception.Message)"
+    if ((Test-Path -LiteralPath $backupPath) -and -not (Test-Path -LiteralPath $targetPath)) {{
+        Move-Item -LiteralPath $backupPath -Destination $targetPath -Force -ErrorAction SilentlyContinue
+    }}
 }}
-if (Test-Path -LiteralPath $targetPath) {{
-    Move-Item -LiteralPath $targetPath -Destination $backupPath -Force
-}}
-Move-Item -LiteralPath $downloadedPath -Destination $targetPath -Force
-$env:PYINSTALLER_RESET_ENVIRONMENT = '1'
-Get-ChildItem Env:_PYI_* -ErrorAction SilentlyContinue | Remove-Item -ErrorAction SilentlyContinue
-$ie4uinitPath = Join-Path (Join-Path $env:SystemRoot 'System32') 'ie4uinit.exe'
-if (Test-Path -LiteralPath $ie4uinitPath) {{
-    Start-Process -FilePath $ie4uinitPath -ArgumentList '-show' -WindowStyle Hidden -ErrorAction SilentlyContinue
-}}
-Start-Process -FilePath $targetPath
-Start-Sleep -Seconds 2
-Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 """
 
         try:
