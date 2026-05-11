@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+
+venv/
+.venv/
+
+build/
+dist/
+*.spec.bak
+
+.vscode/
+
+*.log
+
+bandit_data.json
+Screenshot *.png
