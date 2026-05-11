@@ -35,11 +35,13 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # Discount battle joiner
 # 3 cent collector/gambler
 # Increase scan scroller limit
+# Auto open daily case
 
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
+APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -74,6 +76,7 @@ def app_data_path(filename):
 
 
 IMAGE_PATH = resource_path("Join Rain Event.png")
+ICON_PATH = resource_path("app_icon.ico")
 DEFAULT_DATA_PATH = resource_path("bandit_data.json")
 DATA_PATH = app_data_path("bandit_data.json")
 ALERT_SOUND_PATH = resource_path("rain_alert.wav")
@@ -633,10 +636,21 @@ def powershell_quote(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def set_windows_app_user_model_id():
+    if sys.platform != "win32":
+        return
+
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
+
+
 # ================= APP =================
 
 class App(ctk.CTk):
     def __init__(self):
+        set_windows_app_user_model_id()
         super().__init__()
 
         if not os.path.exists(IMAGE_PATH):
@@ -645,6 +659,7 @@ class App(ctk.CTk):
         ctk.set_appearance_mode("dark")
 
         self.title("Bandit Automation")
+        self.apply_window_icon()
         self.geometry("1120x680")
         self.minsize(900, 560)
 
@@ -725,6 +740,22 @@ class App(ctk.CTk):
         self.active_stats_page = "Rain"
         self.after(500, self.refresh_stats_live)
         self.after(1500, self.check_for_updates_on_startup)
+
+    def apply_window_icon(self):
+        if not os.path.exists(ICON_PATH):
+            return
+
+        try:
+            self.iconbitmap(ICON_PATH)
+        except Exception:
+            pass
+
+        try:
+            icon_image = Image.open(ICON_PATH)
+            self.window_icon_photo = ImageTk.PhotoImage(icon_image)
+            self.iconphoto(True, self.window_icon_photo)
+        except Exception:
+            pass
 
     # ================= UPDATES =================
 
@@ -1762,23 +1793,6 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
         self.settings_status_label.pack(anchor="w", padx=18, pady=(0, 8))
 
         ctk.CTkFrame(self.left_panel, height=1, fg_color="#24201d").pack(fill="x", padx=18, pady=18)
-
-        ctk.CTkLabel(
-            self.left_panel,
-            text="IMAGE",
-            text_color=COLORS["orange"],
-            font=ctk.CTkFont(size=13, weight="bold"),
-        ).pack(anchor="w", padx=18)
-
-        ctk.CTkLabel(
-            self.left_panel,
-            text=os.path.basename(IMAGE_PATH),
-            text_color=COLORS["text"],
-            font=ctk.CTkFont(size=12),
-            wraplength=230,
-        ).pack(anchor="w", padx=18, pady=(4, 20))
-
-        ctk.CTkFrame(self.left_panel, height=1, fg_color="#24201d").pack(fill="x", padx=18, pady=(0, 18))
 
         ctk.CTkLabel(
             self.left_panel,

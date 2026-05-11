@@ -75,6 +75,7 @@ a = Analysis(
         (os.path.join(python_dlls, 'tk86t.dll'), '.'),
     ],
     datas=[
+        ('app_icon.ico', '.'),
         ('Join Rain Event.png', '.'),
         ('100 % off .png', '.'),
         ('Rain amount.png', '.'),
@@ -109,6 +110,7 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
+    icon='app_icon.ico',
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
