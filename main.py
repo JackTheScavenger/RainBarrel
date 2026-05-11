@@ -40,7 +40,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -1033,6 +1033,8 @@ if (Test-Path -LiteralPath $targetPath) {{
     Move-Item -LiteralPath $targetPath -Destination $backupPath -Force
 }}
 Move-Item -LiteralPath $downloadedPath -Destination $targetPath -Force
+$env:PYINSTALLER_RESET_ENVIRONMENT = '1'
+Get-ChildItem Env:_PYI_* -ErrorAction SilentlyContinue | Remove-Item -ErrorAction SilentlyContinue
 Start-Process -FilePath $targetPath
 Start-Sleep -Seconds 2
 Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
