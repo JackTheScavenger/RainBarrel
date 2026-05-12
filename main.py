@@ -39,7 +39,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.0.17"
+APP_VERSION = "1.0.18"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -915,7 +915,15 @@ class App(ctk.CTk):
                 raise ValueError("Update manifest needs version and url")
 
             if version_is_newer(remote_version, APP_VERSION):
-                if not silent:
+                if silent:
+                    self.after(
+                        0,
+                        lambda version=remote_version: self.show_update_message(
+                            f"Update {version} is available. Use CHECK FOR UPDATES to install.",
+                            COLORS["green"],
+                        ),
+                    )
+                else:
                     self.after(
                         0,
                         lambda version=remote_version: self.show_update_message(
@@ -923,7 +931,7 @@ class App(ctk.CTk):
                             COLORS["green"],
                         ),
                     )
-                self.after(0, lambda data=manifest: self.prompt_update_available(data))
+                    self.after(0, lambda data=manifest: self.prompt_update_available(data))
             else:
                 self.after(
                     0,
@@ -979,9 +987,8 @@ class App(ctk.CTk):
         dialog = ctk.CTkToplevel(self)
         dialog.geometry("500x300")
         dialog.resizable(False, False)
-        dialog.overrideredirect(True)
+        dialog.title("Update Available")
         dialog.transient(self)
-        dialog.grab_set()
         dialog.configure(fg_color=COLORS["bg"])
         self.update_dialog = dialog
 
@@ -990,6 +997,9 @@ class App(ctk.CTk):
         x = self.winfo_x() + (self.winfo_width() - 500) // 2
         y = self.winfo_y() + (self.winfo_height() - 300) // 2
         dialog.geometry(f"500x300+{max(x, 0)}+{max(y, 0)}")
+        dialog.lift()
+        dialog.attributes("-topmost", True)
+        dialog.after(1200, lambda: dialog.attributes("-topmost", False))
 
         shell = ctk.CTkFrame(
             dialog,
