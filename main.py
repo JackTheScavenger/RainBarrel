@@ -6,7 +6,6 @@ import ctypes
 import hashlib
 import math
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -40,7 +39,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.0.10"
+APP_VERSION = "1.0.11"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -84,7 +83,7 @@ ALERT_SOUND_PATH = resource_path("rain_alert.wav")
 BANDIT_CAMP_URL = "https://bandit.camp/"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/RainBarrel/main/latest.json"
 UPDATE_CHECK_TIMEOUT_SECONDS = 8
-UPDATE_DOWNLOAD_TIMEOUT_SECONDS = 60
+UPDATE_DOWNLOAD_TIMEOUT_SECONDS = 5 * 60
 SELENIUM_PAGE_WAIT = 45
 RAIN_REWARD_WATCH_SECONDS = 45 * 60
 RAIN_REWARD_SCAN_INTERVAL_SECONDS = 3
@@ -801,6 +800,7 @@ class App(ctk.CTk):
         self.update_dialog = None
         self.update_panel_status_label = None
         self.update_progress = None
+        self.update_progress_is_indeterminate = False
 
         self.total_search_time_seconds = float(saved_stats.get("total_search_time_seconds", 0.0))
         self.total_rains_clicked = int(
@@ -1082,6 +1082,7 @@ class App(ctk.CTk):
         if self.update_progress is not None:
             try:
                 self.update_progress.start()
+                self.update_progress_is_indeterminate = True
             except Exception:
                 self.update_progress = None
 
@@ -1106,8 +1107,28 @@ class App(ctk.CTk):
                 headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"},
             )
             with urllib.request.urlopen(request, timeout=UPDATE_DOWNLOAD_TIMEOUT_SECONDS) as response:
+                total_size = response.headers.get("Content-Length")
+                try:
+                    total_size = int(total_size) if total_size else None
+                except ValueError:
+                    total_size = None
+
+                downloaded_size = 0
                 with open(downloaded_path, "wb") as file:
-                    shutil.copyfileobj(response, file)
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+
+                        file.write(chunk)
+                        downloaded_size += len(chunk)
+                        self.after(
+                            0,
+                            lambda done=downloaded_size, total=total_size: self.report_update_download_progress(
+                                done,
+                                total,
+                            ),
+                        )
 
             if expected_hash:
                 actual_hash = sha256_file(downloaded_path).lower()
@@ -1130,6 +1151,38 @@ class App(ctk.CTk):
             except Exception:
                 self.update_progress = None
         self.show_update_message(message, COLORS["orange"])
+
+    def report_update_download_progress(self, downloaded_size, total_size):
+        if total_size:
+            percent = min(max(downloaded_size / total_size, 0.0), 1.0)
+            downloaded_mb = downloaded_size / (1024 * 1024)
+            total_mb = total_size / (1024 * 1024)
+            text = f"Downloading update... {percent * 100:.0f}% ({downloaded_mb:.1f}/{total_mb:.1f} MB)"
+
+            if self.update_progress is not None:
+                try:
+                    if self.update_progress_is_indeterminate:
+                        self.update_progress.stop()
+                        self.update_progress_is_indeterminate = False
+                    self.update_progress.set(percent)
+                except Exception:
+                    self.update_progress = None
+        else:
+            downloaded_mb = downloaded_size / (1024 * 1024)
+            text = f"Downloading update... {downloaded_mb:.1f} MB"
+
+        if self.update_status_label is not None:
+            try:
+                self.update_status_label.configure(text=text, text_color=COLORS["muted"])
+            except Exception:
+                self.update_status_label = None
+
+        if self.update_panel_status_label is not None:
+            try:
+                if self.update_panel_status_label.winfo_exists():
+                    self.update_panel_status_label.configure(text=text, text_color=COLORS["muted"])
+            except Exception:
+                pass
 
     def install_downloaded_update(self, downloaded_path):
         target_path = sys.executable
