@@ -40,7 +40,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -76,6 +76,7 @@ def app_data_path(filename):
 
 
 IMAGE_PATH = resource_path("Join Rain Event.png")
+BATTLE_DISCOUNT_IMAGE_PATH = resource_path("100 % off .png")
 ICON_PATH = resource_path("app_icon.ico")
 DEFAULT_DATA_PATH = resource_path("bandit_data.json")
 DATA_PATH = app_data_path("bandit_data.json")
@@ -88,6 +89,9 @@ SELENIUM_PAGE_WAIT = 45
 RAIN_REWARD_WATCH_SECONDS = 45 * 60
 RAIN_REWARD_SCAN_INTERVAL_SECONDS = 3
 RAIN_REWARD_HISTORY_LIMIT = 100
+BATTLE_SCAN_INTERVAL_SECONDS = 2.5
+BATTLE_CLICK_OFFSET_X = 260
+BATTLE_CLICK_OFFSET_Y = 0
 
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0
@@ -136,6 +140,54 @@ def locate_image_all_monitors(image_path, confidence=0.65):
             return x, y, max_val
 
     return None
+
+
+def locate_image_matches_all_monitors(image_path, confidence=0.65, max_matches=8):
+    target = cv2.imread(image_path, cv2.IMREAD_COLOR)
+
+    if target is None:
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
+    with mss.mss() as sct:
+        monitor = sct.monitors[0]
+        screen = np.array(sct.grab(monitor))
+
+    screen_rgb = cv2.cvtColor(screen, cv2.COLOR_BGRA2RGB)
+    screen_bgr = cv2.cvtColor(screen, cv2.COLOR_BGRA2BGR)
+    result = cv2.matchTemplate(screen_bgr, target, cv2.TM_CCOEFF_NORMED)
+    h, w = target.shape[:2]
+
+    candidates = []
+    ys, xs = np.where(result >= confidence)
+    for x, y in zip(xs, ys):
+        candidates.append(
+            {
+                "left": monitor["left"] + int(x),
+                "top": monitor["top"] + int(y),
+                "x": monitor["left"] + int(x) + w // 2,
+                "y": monitor["top"] + int(y) + h // 2,
+                "width": w,
+                "height": h,
+                "score": float(result[y, x]),
+            }
+        )
+
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    matches = []
+    min_distance = max(w, h) * 0.65
+    for candidate in candidates:
+        if len(matches) >= max_matches:
+            break
+
+        if any(
+            math.hypot(candidate["x"] - match["x"], candidate["y"] - match["y"]) < min_distance
+            for match in matches
+        ):
+            continue
+
+        matches.append(candidate)
+
+    return matches, Image.fromarray(screen_rgb), monitor
 
 
 def page_is_cloudflare_challenge(page):
@@ -229,6 +281,46 @@ def read_rain_reward_amount_from_screen():
         return None, "Rain reward popup not visible yet"
 
     return amount, f"Read reward popup: {amount:.2f} scrap"
+
+
+def parse_battle_discount(text):
+    normalized = text.replace("％", "%").replace("O", "0").replace("o", "0")
+    match = re.search(r"([0-9]{1,3}(?:[.,][0-9]+)?)\s*%", normalized)
+    if not match:
+        return None
+
+    try:
+        return min(max(float(match.group(1).replace(",", ".")), 0.0), 100.0)
+    except ValueError:
+        return None
+
+
+def read_battle_discount_from_screen(screenshot, match, monitor):
+    left = max(monitor["left"], match["left"] - 90)
+    top = max(monitor["top"], match["top"] - 55)
+    right = min(monitor["left"] + monitor["width"], match["left"] + match["width"] + 140)
+    bottom = min(monitor["top"] + monitor["height"], match["top"] + match["height"] + 75)
+
+    relative_box = (
+        int(left - monitor["left"]),
+        int(top - monitor["top"]),
+        int(right - monitor["left"]),
+        int(bottom - monitor["top"]),
+    )
+
+    try:
+        crop = screenshot.crop(relative_box)
+        text = asyncio.run(ocr_image_with_windows(crop))
+    except (ImportError, ModuleNotFoundError):
+        return None, "Windows OCR packages are not installed"
+    except Exception as e:
+        return None, f"OCR failed: {e.__class__.__name__}"
+
+    discount = parse_battle_discount(text)
+    if discount is None:
+        return None, "No discount percent readable near match"
+
+    return discount, f"Read battle discount: {discount:.0f}%"
 
 
 def check_bandit_rain_event_http():
@@ -655,6 +747,8 @@ class App(ctk.CTk):
 
         if not os.path.exists(IMAGE_PATH):
             raise FileNotFoundError(f"Missing image: {IMAGE_PATH}")
+        if not os.path.exists(BATTLE_DISCOUNT_IMAGE_PATH):
+            raise FileNotFoundError(f"Missing image: {BATTLE_DISCOUNT_IMAGE_PATH}")
 
         ctk.set_appearance_mode("dark")
 
@@ -664,6 +758,9 @@ class App(ctk.CTk):
         self.minsize(900, 560)
 
         self.running = False
+        self.battle_running = False
+        self.battle_thread = None
+        self.battle_run_id = 0
         self.weather_station_thread = None
         self.weather_station_driver = None
         self.weather_station_run_id = 0
@@ -685,6 +782,12 @@ class App(ctk.CTk):
         )
         self.weather_station_warn_before_open = ctk.BooleanVar(
             value=saved_settings.get("weather_station_warn_before_open", True)
+        )
+        self.battle_minimum_discount = ctk.DoubleVar(
+            value=saved_settings.get("battle_minimum_discount", 100.0)
+        )
+        self.battle_free_cases_only = ctk.BooleanVar(
+            value=saved_settings.get("battle_free_cases_only", True)
         )
         self.rain_chart_mode = ctk.StringVar(value=saved_settings.get("rain_chart_mode", "Bar"))
         self.weather_station_enabled = ctk.BooleanVar(value=False)
@@ -1149,6 +1252,8 @@ try {{
             "weather_station_interval": int(self.weather_station_interval.get()),
             "weather_notification_volume": int(self.weather_notification_volume.get()),
             "weather_station_warn_before_open": bool(self.weather_station_warn_before_open.get()),
+            "battle_minimum_discount": round(float(self.battle_minimum_discount.get()), 1),
+            "battle_free_cases_only": bool(self.battle_free_cases_only.get()),
             "rain_chart_mode": self.get_rain_chart_mode(),
         }
 
@@ -1228,6 +1333,22 @@ try {{
             )
 
         self.log(message)
+        self.refresh_stats_now()
+
+    def apply_battle_settings(self):
+        self.battle_minimum_discount.set(
+            min(max(float(self.battle_minimum_discount.get()), 0.0), 100.0)
+        )
+
+        saved = self.save_data()
+        message = "Battle settings applied" if saved else "Save failed"
+        if hasattr(self, "battle_settings_status_label"):
+            self.battle_settings_status_label.configure(
+                text=message,
+                text_color=COLORS["green"] if saved else COLORS["red2"],
+            )
+
+        self.battle_log(message)
         self.refresh_stats_now()
 
     def preview_weather_notification_volume(self, value):
@@ -1687,7 +1808,7 @@ try {{
 
     def refresh_keep_awake_state(self):
         flags = ES_CONTINUOUS
-        if self.running or self.weather_station_active:
+        if self.running or self.weather_station_active or self.battle_running:
             flags |= ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
 
         try:
@@ -1699,11 +1820,13 @@ try {{
             self.after_cancel(self.keep_awake_job)
             self.keep_awake_job = None
 
-        if self.running or self.weather_station_active:
+        if self.running or self.weather_station_active or self.battle_running:
             self.keep_awake_job = self.after(45000, self.refresh_keep_awake_state)
 
     def on_close(self):
         self.running = False
+        self.battle_running = False
+        self.battle_run_id += 1
         self.stop_rain_session()
         if self.weather_station_active or self.weather_station_driver is not None:
             self.disable_weather_station(status_text="Weather station off")
@@ -1853,22 +1976,49 @@ try {{
 
         ctk.CTkLabel(
             self.left_panel,
-            text="Battle tools coming soon",
+            text="Battle finder settings",
             text_color=COLORS["muted"],
             font=ctk.CTkFont(size=12),
         ).pack(anchor="w", padx=18, pady=(0, 16))
 
-        BanditButton(
+        self.add_setting(
+            "Minimum Discount",
+            self.battle_minimum_discount,
+            0,
+            100,
+        )
+
+        self.battle_free_cases_switch = ctk.CTkSwitch(
             self.left_panel,
-            text="BATTLE FINDER",
-            command=lambda: self.log("Battle Finder selected")
-        ).pack(fill="x", padx=18, pady=8)
+            text="FREE CASES ONLY",
+            variable=self.battle_free_cases_only,
+            command=self.apply_battle_settings,
+            onvalue=True,
+            offvalue=False,
+            fg_color="#3a3a3a",
+            progress_color=COLORS["green"],
+            button_color="#d8d2ca",
+            button_hover_color="#ffffff",
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        self.battle_free_cases_switch.pack(anchor="w", padx=18, pady=(2, 14))
 
         BanditButton(
             self.left_panel,
-            text="AUTO JOIN",
-            command=lambda: self.log("Auto Join selected")
-        ).pack(fill="x", padx=18, pady=8)
+            text="APPLY",
+            command=self.apply_battle_settings,
+        ).pack(fill="x", padx=18, pady=(4, 6))
+
+        self.battle_settings_status_label = ctk.CTkLabel(
+            self.left_panel,
+            text="Free cases only requires a 100% discount.",
+            text_color=COLORS["muted"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+            wraplength=230,
+            justify="left",
+        )
+        self.battle_settings_status_label.pack(anchor="w", padx=18, pady=(0, 8))
 
     def build_rain_left_panel(self):
         ctk.CTkLabel(
@@ -2488,30 +2638,51 @@ try {{
         self.log("Rain page loaded")
 
     def battles_page(self):
-        self.page_title("BATTLES", "COMING SOON")
+        self.page_title("BATTLES", "SCREEN SCANNER")
 
-        grid = ctk.CTkFrame(self.content, fg_color="transparent")
-        grid.pack(fill="both", expand=True, padx=28, pady=10)
+        card = ctk.CTkFrame(
+            self.content,
+            fg_color="#181412",
+            border_color="#331f19",
+            border_width=1,
+            corner_radius=10,
+        )
+        card.pack(fill="both", expand=True, padx=34, pady=8)
 
-        for i in range(4):
-            card = ctk.CTkFrame(
-                grid,
-                height=150,
-                fg_color="#191513",
-                border_color="#2f1d18",
-                border_width=1,
-                corner_radius=10,
-            )
-            card.grid(row=i // 2, column=i % 2, padx=12, pady=12, sticky="nsew")
+        ctk.CTkLabel(
+            card,
+            text="BATTLE AUTO JOIN",
+            text_color=COLORS["red2"],
+            font=ctk.CTkFont(family="Impact", size=30),
+        ).pack(pady=(24, 6))
 
-            ctk.CTkLabel(
-                card,
-                text="LOCKED",
-                text_color=COLORS["red2"],
-                font=ctk.CTkFont(family="Impact", size=30),
-            ).pack(expand=True)
+        self.battle_status_label = ctk.CTkLabel(
+            card,
+            text=self.get_battle_status_text(),
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        self.battle_status_label.pack(pady=(0, 12))
 
-        grid.grid_columnconfigure((0, 1), weight=1)
+        self.battle_toggle_btn = BanditButton(
+            card,
+            text=self.get_battle_toggle_text(),
+            command=self.toggle_battle_scanner,
+        )
+        self.battle_toggle_btn.pack(pady=(0, 16))
+
+        self.battle_log_box = ctk.CTkTextbox(
+            card,
+            height=260,
+            fg_color="#090909",
+            border_color="#2a211d",
+            border_width=1,
+            text_color=COLORS["text"],
+            corner_radius=8,
+        )
+        self.battle_log_box.pack(fill="both", expand=True, padx=22, pady=(0, 22))
+
+        self.battle_log("Battles page loaded")
 
     def get_stats_sections(self, stat_page):
         if stat_page == "Rain":
@@ -2564,9 +2735,9 @@ try {{
             (
                 "BATTLES",
                 [
-                    ("Status", "Setup coming soon"),
-                    ("Tracked Time", "--"),
-                    ("Tracked Wins", "--"),
+                    ("Status", "Scanning" if self.battle_running else "Stopped"),
+                    ("Minimum Discount", f"{float(self.battle_minimum_discount.get()):.0f}%"),
+                    ("Free Cases Only", "Yes" if self.battle_free_cases_only.get() else "No"),
                 ],
             )
         ]
@@ -2667,7 +2838,135 @@ try {{
         except Exception:
             pass
 
+    def battle_log(self, msg):
+        if not hasattr(self, "battle_log_box"):
+            return
+
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.after(0, lambda: self._battle_log(timestamp, msg))
+
+    def _battle_log(self, timestamp, msg):
+        try:
+            self.battle_log_box.insert("end", f"[{timestamp}] {msg}\n")
+            self.battle_log_box.see("end")
+        except Exception:
+            pass
+
     # ================= AUTOMATION =================
+
+    def get_battle_toggle_text(self):
+        return "STOP BATTLE SCANNER" if self.battle_running else "START BATTLE SCANNER"
+
+    def get_battle_status_text(self):
+        if self.battle_running:
+            return "Scanning for battle discounts"
+
+        return "Stopped"
+
+    def sync_battle_controls(self):
+        if hasattr(self, "battle_toggle_btn"):
+            self.battle_toggle_btn.configure(
+                text=self.get_battle_toggle_text(),
+                fg_color=COLORS["red"] if self.battle_running else COLORS["green"],
+                hover_color="#b83928" if self.battle_running else "#8dc34b",
+                text_color=COLORS["text"] if self.battle_running else "#111111",
+            )
+
+        if hasattr(self, "battle_status_label"):
+            self.battle_status_label.configure(text=self.get_battle_status_text())
+
+    def toggle_battle_scanner(self):
+        if self.battle_running:
+            self.battle_running = False
+            self.battle_run_id += 1
+            self.refresh_keep_awake_state()
+            self.sync_battle_controls()
+            self.battle_log("Battle scanner stopped")
+            return
+
+        self.apply_battle_settings()
+        self.battle_running = True
+        self.battle_run_id += 1
+        run_id = self.battle_run_id
+        self.refresh_keep_awake_state()
+        self.sync_battle_controls()
+        self.battle_log("Battle scanner started")
+        self.battle_thread = threading.Thread(target=self.battle_worker, args=(run_id,), daemon=True)
+        self.battle_thread.start()
+
+    def battle_discount_is_allowed(self, discount):
+        if discount is None:
+            return False
+
+        if self.battle_free_cases_only.get():
+            return discount >= 100.0
+
+        return discount >= float(self.battle_minimum_discount.get())
+
+    def battle_worker(self, run_id):
+        while self.battle_running and run_id == self.battle_run_id:
+            try:
+                matches, screenshot, monitor = locate_image_matches_all_monitors(
+                    BATTLE_DISCOUNT_IMAGE_PATH,
+                    confidence=max(0.55, float(self.confidence.get()) - 0.05),
+                    max_matches=8,
+                )
+
+                if not matches:
+                    self.battle_log("No battle discount found")
+                    time.sleep(BATTLE_SCAN_INTERVAL_SECONDS)
+                    continue
+
+                clicked = False
+                for match in matches:
+                    discount, detail = read_battle_discount_from_screen(screenshot, match, monitor)
+                    if discount is None:
+                        self.battle_log(detail)
+                        continue
+
+                    self.battle_log(
+                        f"Found discount {discount:.0f}% | confidence={match['score']:.3f}"
+                    )
+                    if not self.battle_discount_is_allowed(discount):
+                        continue
+
+                    click_x = match["x"] + BATTLE_CLICK_OFFSET_X
+                    click_y = match["y"] + BATTLE_CLICK_OFFSET_Y
+                    self.battle_log(f"Joining battle at X={click_x} Y={click_y}")
+
+                    move_cursor_smooth(
+                        click_x,
+                        click_y,
+                        total_time=self.move_time.get(),
+                        steps=int(self.move_steps.get()),
+                    )
+
+                    if not self.battle_running or run_id != self.battle_run_id:
+                        break
+
+                    pyautogui.click(click_x, click_y)
+                    clicked = True
+                    time.sleep(4)
+                    break
+
+                if matches and not clicked:
+                    if self.battle_free_cases_only.get():
+                        self.battle_log("Skipped: no free case discount found")
+                    else:
+                        self.battle_log(
+                            f"Skipped: no discount met {float(self.battle_minimum_discount.get()):.0f}%"
+                        )
+
+            except Exception as e:
+                self.error_count += 1
+                self.last_action = "Battle scanner error"
+                self.after(0, self.save_stats)
+                self.battle_log(f"Error: {type(e).__name__}: {repr(e)}")
+
+            time.sleep(BATTLE_SCAN_INTERVAL_SECONDS)
+
+        if run_id == self.battle_run_id:
+            self.after(0, self.sync_battle_controls)
 
     def toggle(self):
         self.running = not self.running
