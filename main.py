@@ -39,7 +39,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.0.14"
+APP_VERSION = "1.0.15"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -892,9 +892,15 @@ class App(ctk.CTk):
 
     def update_check_worker(self, silent):
         try:
+            separator = "&" if "?" in UPDATE_MANIFEST_URL else "?"
+            manifest_url = f"{UPDATE_MANIFEST_URL}{separator}_={int(time.time())}"
             request = urllib.request.Request(
-                UPDATE_MANIFEST_URL,
-                headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"},
+                manifest_url,
+                headers={
+                    "User-Agent": f"{APP_NAME}/{APP_VERSION}",
+                    "Cache-Control": "no-cache",
+                    "Pragma": "no-cache",
+                },
             )
             with urllib.request.urlopen(request, timeout=UPDATE_CHECK_TIMEOUT_SECONDS) as response:
                 manifest = json.loads(response.read().decode("utf-8", errors="ignore"))
@@ -908,24 +914,31 @@ class App(ctk.CTk):
                 raise ValueError("Update manifest needs version and url")
 
             if version_is_newer(remote_version, APP_VERSION):
+                if not silent:
+                    self.after(
+                        0,
+                        lambda version=remote_version: self.show_update_message(
+                            f"Update {version} found.",
+                            COLORS["green"],
+                        ),
+                    )
                 self.after(0, lambda data=manifest: self.prompt_update_available(data))
-            elif not silent:
+            else:
                 self.after(
                     0,
-                    lambda: self.show_update_message(
-                        f"RainBarrel is up to date ({APP_VERSION}).",
+                    lambda version=remote_version: self.show_update_message(
+                        f"RainBarrel is up to date ({APP_VERSION}). Latest manifest is {version}.",
                         COLORS["green"],
                     ),
                 )
         except Exception as e:
-            if not silent:
-                self.after(
-                    0,
-                    lambda error=e: self.show_update_message(
-                        f"Update check failed: {error}",
-                        COLORS["orange"],
-                    ),
-                )
+            self.after(
+                0,
+                lambda error=e: self.show_update_message(
+                    f"Update check failed: {error}",
+                    COLORS["orange"],
+                ),
+            )
         finally:
             self.after(0, self.finish_update_check)
 
