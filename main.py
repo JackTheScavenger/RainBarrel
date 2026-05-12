@@ -39,7 +39,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.0.12"
+APP_VERSION = "1.0.13"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -1129,12 +1129,16 @@ class App(ctk.CTk):
                                 total,
                             ),
                         )
+                        if total_size and downloaded_size >= total_size:
+                            break
 
             if expected_hash:
+                self.after(0, lambda: self.show_update_message("Verifying update...", COLORS["muted"]))
                 actual_hash = sha256_file(downloaded_path).lower()
                 if actual_hash != expected_hash:
                     raise ValueError("Downloaded update did not match the expected SHA256 hash")
 
+            self.after(0, lambda: self.show_update_message("Preparing installer...", COLORS["muted"]))
             self.after(0, lambda path=downloaded_path: self.install_downloaded_update(path))
         except Exception as e:
             self.after(
