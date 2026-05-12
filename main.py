@@ -40,7 +40,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.0.10"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -798,6 +798,7 @@ class App(ctk.CTk):
         self.update_check_in_progress = False
         self.update_download_in_progress = False
         self.update_status_label = None
+        self.update_dialog = None
         self.update_panel_status_label = None
         self.update_progress = None
 
@@ -968,6 +969,7 @@ class App(ctk.CTk):
         dialog.transient(self)
         dialog.grab_set()
         dialog.configure(fg_color=COLORS["bg"])
+        self.update_dialog = dialog
 
         self.update_idletasks()
         dialog.update_idletasks()
@@ -1029,15 +1031,27 @@ class App(ctk.CTk):
         button_row.pack(fill="x", padx=22, pady=(18, 16))
         button_row.grid_columnconfigure((0, 1), weight=1)
 
-        def close_dialog():
+        def clear_update_dialog_refs():
             self.update_status_label = None
             self.update_progress = None
-            dialog.destroy()
+            if self.update_dialog is dialog:
+                self.update_dialog = None
+
+        def close_dialog():
+            if self.update_download_in_progress:
+                self.show_update_message("Update is still downloading...", COLORS["muted"])
+                return
+
+            clear_update_dialog_refs()
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
 
         def start_update():
             for child in button_row.winfo_children():
                 child.configure(state="disabled")
-            self.begin_update_download(manifest, dialog)
+            self.begin_update_download(manifest)
 
         BanditButton(
             button_row,
@@ -1059,22 +1073,25 @@ class App(ctk.CTk):
 
         dialog.protocol("WM_DELETE_WINDOW", close_dialog)
 
-    def begin_update_download(self, manifest, dialog):
+    def begin_update_download(self, manifest):
         if self.update_download_in_progress:
             return
 
         self.update_download_in_progress = True
         self.show_update_message("Downloading update...", COLORS["muted"])
         if self.update_progress is not None:
-            self.update_progress.start()
+            try:
+                self.update_progress.start()
+            except Exception:
+                self.update_progress = None
 
         threading.Thread(
             target=self.update_download_worker,
-            args=(manifest, dialog),
+            args=(manifest,),
             daemon=True,
         ).start()
 
-    def update_download_worker(self, manifest, dialog):
+    def update_download_worker(self, manifest):
         try:
             update_url = str(manifest.get("url", "")).strip()
             expected_hash = str(manifest.get("sha256", "")).strip().lower()
@@ -1097,7 +1114,7 @@ class App(ctk.CTk):
                 if actual_hash != expected_hash:
                     raise ValueError("Downloaded update did not match the expected SHA256 hash")
 
-            self.after(0, lambda path=downloaded_path, d=dialog: self.install_downloaded_update(path, d))
+            self.after(0, lambda path=downloaded_path: self.install_downloaded_update(path))
         except Exception as e:
             self.after(
                 0,
@@ -1107,11 +1124,14 @@ class App(ctk.CTk):
     def finish_failed_update(self, message):
         self.update_download_in_progress = False
         if self.update_progress is not None:
-            self.update_progress.stop()
-            self.update_progress.set(0)
+            try:
+                self.update_progress.stop()
+                self.update_progress.set(0)
+            except Exception:
+                self.update_progress = None
         self.show_update_message(message, COLORS["orange"])
 
-    def install_downloaded_update(self, downloaded_path, dialog):
+    def install_downloaded_update(self, downloaded_path):
         target_path = sys.executable
         target_dir = os.path.dirname(target_path)
         if not os.access(target_dir, os.W_OK):
@@ -1218,9 +1238,12 @@ try {{
 
         self.show_update_message("Installing update. RainBarrel will restart now...", COLORS["green"])
         if self.update_progress is not None:
-            self.update_progress.stop()
-            self.update_progress.set(1)
-        dialog.after(800, self.on_close)
+            try:
+                self.update_progress.stop()
+                self.update_progress.set(1)
+            except Exception:
+                self.update_progress = None
+        self.after(800, self.on_close)
 
     # ================= PERSISTENCE =================
 
