@@ -39,7 +39,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.0.19"
+APP_VERSION = "1.0.20"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -1163,7 +1163,7 @@ class App(ctk.CTk):
                     raise ValueError("Downloaded update did not match the expected SHA256 hash")
 
             self.after(0, lambda: self.show_update_message("Preparing installer...", COLORS["muted"]))
-            self.after(0, lambda path=downloaded_path: self.install_downloaded_update(path))
+            self.after(0, lambda path=downloaded_path: self.try_install_downloaded_update(path))
         except Exception as e:
             self.after(
                 0,
@@ -1212,6 +1212,12 @@ class App(ctk.CTk):
             except Exception:
                 pass
 
+    def try_install_downloaded_update(self, downloaded_path):
+        try:
+            self.install_downloaded_update(downloaded_path)
+        except Exception as e:
+            self.finish_failed_update(f"Could not prepare installer: {e}")
+
     def install_downloaded_update(self, downloaded_path):
         target_path = sys.executable
         target_dir = os.path.dirname(target_path)
@@ -1245,7 +1251,7 @@ function Invoke-WithRetry($description, [scriptblock]$action) {{
             if ($attempt -eq 20) {{
                 throw
             }}
-            Write-UpdateLog "$description failed on attempt ${attempt}: $($_.Exception.Message)"
+            Write-UpdateLog "$description failed on attempt ${{attempt}}: $($_.Exception.Message)"
             Start-Sleep -Milliseconds 500
         }}
     }}
