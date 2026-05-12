@@ -39,7 +39,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.0.15"
+APP_VERSION = "1.0.16"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -757,6 +757,7 @@ class App(ctk.CTk):
         self.minsize(900, 560)
 
         self.running = False
+        self.closing = False
         self.battle_running = False
         self.battle_thread = None
         self.battle_run_id = 0
@@ -1916,18 +1917,61 @@ try {{
         if self.running or self.weather_station_active or self.battle_running:
             self.keep_awake_job = self.after(45000, self.refresh_keep_awake_state)
 
+    def close_driver_async(self, driver):
+        if driver is None:
+            return
+
+        def close_driver():
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+        threading.Thread(target=close_driver, daemon=True).start()
+
     def on_close(self):
+        if self.closing:
+            return
+
+        self.closing = True
         self.running = False
         self.battle_running = False
         self.battle_run_id += 1
-        self.stop_rain_session()
-        if self.weather_station_active or self.weather_station_driver is not None:
-            self.disable_weather_station(status_text="Weather station off")
-        else:
+
+        driver = self.weather_station_driver
+        self.weather_station_driver = None
+        self.weather_station_active = False
+        self.weather_station_run_id += 1
+
+        try:
+            self.weather_station_enabled.set(False)
+        except Exception:
+            pass
+
+        if self.keep_awake_job:
+            try:
+                self.after_cancel(self.keep_awake_job)
+            except Exception:
+                pass
+            self.keep_awake_job = None
+
+        try:
+            self.stop_rain_session()
             self.stop_weather_station_timer()
-        self.refresh_keep_awake_state()
-        self.save_data()
-        self.destroy()
+            self.refresh_keep_awake_state()
+            self.save_data()
+        except Exception:
+            pass
+
+        self.close_driver_async(driver)
+
+        try:
+            self.destroy()
+        except Exception:
+            try:
+                self.quit()
+            except Exception:
+                pass
 
     # ================= UI BUILD =================
 
@@ -2337,11 +2381,7 @@ try {{
 
         driver = self.weather_station_driver
         self.weather_station_driver = None
-        if driver is not None:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+        self.close_driver_async(driver)
 
         self.set_weather_station_status(status_text, COLORS["muted"])
         if log_message:
