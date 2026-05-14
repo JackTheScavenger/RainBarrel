@@ -39,7 +39,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -776,6 +776,18 @@ class App(ctk.CTk):
         self.interval = ctk.DoubleVar(value=saved_settings.get("interval", 25.0))
         self.move_time = ctk.DoubleVar(value=saved_settings.get("move_time", 1.5))
         self.move_steps = ctk.IntVar(value=saved_settings.get("move_steps", 100))
+        self.rain_collect_any_time = ctk.BooleanVar(
+            value=saved_settings.get("rain_collect_any_time", True)
+        )
+        self.rain_collect_start_time = ctk.StringVar(
+            value=saved_settings.get("rain_collect_start_time", "00:00")
+        )
+        self.rain_collect_end_time = ctk.StringVar(
+            value=saved_settings.get("rain_collect_end_time", "23:59")
+        )
+        self.rain_collect_chance = ctk.IntVar(
+            value=int(float(saved_settings.get("rain_collect_chance", 100)))
+        )
         self.weather_station_interval = ctk.IntVar(value=saved_settings.get("weather_station_interval", 15))
         self.weather_notification_volume = ctk.IntVar(
             value=saved_settings.get("weather_notification_volume", 100)
@@ -835,6 +847,7 @@ class App(ctk.CTk):
         self.bg_image = None
         self.bg_job = None
         self.hourly_chart_canvas = None
+        self.chance_skipped_rain_target = None
 
         self.build_ui()
         self.show_page("Rain")
@@ -1359,6 +1372,10 @@ try {{
             "interval": round(float(self.interval.get()), 3),
             "move_time": round(float(self.move_time.get()), 3),
             "move_steps": int(self.move_steps.get()),
+            "rain_collect_any_time": bool(self.rain_collect_any_time.get()),
+            "rain_collect_start_time": self.rain_collect_start_time.get(),
+            "rain_collect_end_time": self.rain_collect_end_time.get(),
+            "rain_collect_chance": int(self.rain_collect_chance.get()),
             "weather_station_interval": int(self.weather_station_interval.get()),
             "weather_notification_volume": int(self.weather_notification_volume.get()),
             "weather_station_warn_before_open": bool(self.weather_station_warn_before_open.get()),
@@ -1424,15 +1441,110 @@ try {{
         except OSError:
             return False
 
+    def normalize_time_setting(self, value):
+        value = str(value).strip()
+        if not value:
+            return None
+
+        compact_value = value.upper().replace(" ", "")
+        formats = [
+            ("%H:%M", value),
+            ("%H", value),
+            ("%I:%M %p", value.upper()),
+            ("%I %p", value.upper()),
+            ("%I:%M%p", compact_value),
+            ("%I%p", compact_value),
+        ]
+
+        for time_format, candidate in formats:
+            try:
+                parsed = datetime.strptime(candidate, time_format)
+                return parsed.strftime("%H:%M")
+            except ValueError:
+                continue
+
+        return None
+
+    def time_setting_to_minutes(self, value):
+        normalized = self.normalize_time_setting(value)
+        if not normalized:
+            return None
+
+        hour, minute = normalized.split(":")
+        return int(hour) * 60 + int(minute)
+
+    def rain_collection_time_allowed(self):
+        if self.rain_collect_any_time.get():
+            return True
+
+        start_minutes = self.time_setting_to_minutes(self.rain_collect_start_time.get())
+        end_minutes = self.time_setting_to_minutes(self.rain_collect_end_time.get())
+        if start_minutes is None or end_minutes is None:
+            return False
+
+        now = datetime.now()
+        current_minutes = now.hour * 60 + now.minute
+        if start_minutes <= end_minutes:
+            return start_minutes <= current_minutes <= end_minutes
+
+        return current_minutes >= start_minutes or current_minutes <= end_minutes
+
+    def rain_collection_chance_allowed(self, x, y):
+        skipped = self.chance_skipped_rain_target
+        if skipped and math.hypot(x - skipped[0], y - skipped[1]) < 30:
+            return False
+
+        chance = min(max(float(self.rain_collect_chance.get()), 0.0), 100.0)
+        if chance <= 0:
+            self.chance_skipped_rain_target = (x, y)
+            return False
+
+        if chance >= 100:
+            self.chance_skipped_rain_target = None
+            return True
+
+        if random.uniform(0, 100) <= chance:
+            self.chance_skipped_rain_target = None
+            return True
+
+        self.chance_skipped_rain_target = (x, y)
+        return False
+
+    def rain_collection_allowed(self, x, y):
+        if not self.rain_collection_time_allowed():
+            return False, "Skipped target outside rain collection time"
+
+        if not self.rain_collection_chance_allowed(x, y):
+            chance = min(max(float(self.rain_collect_chance.get()), 0.0), 100.0)
+            return False, f"Skipped target by rain collection chance ({chance:.0f}%)"
+
+        return True, ""
+
+    def set_rain_collect_chance(self, value):
+        self.rain_collect_chance.set(min(max(int(round(float(value))), 0), 100))
+
     def apply_rain_settings(self):
         self.confidence.set(min(max(float(self.confidence.get()), 0.1), 1.0))
         self.interval.set(min(max(float(self.interval.get()), 10.0), 90.0))
         self.move_time.set(min(max(float(self.move_time.get()), 0.1), 5.0))
         self.move_steps.set(min(max(int(float(self.move_steps.get())), 10), 250))
+        self.rain_collect_chance.set(min(max(int(float(self.rain_collect_chance.get())), 0), 100))
         self.weather_station_interval.set(min(max(int(float(self.weather_station_interval.get())), 10), 90))
         self.weather_notification_volume.set(
             min(max(int(float(self.weather_notification_volume.get())), 0), 100)
         )
+
+        start_time = self.normalize_time_setting(self.rain_collect_start_time.get())
+        end_time = self.normalize_time_setting(self.rain_collect_end_time.get())
+        if not self.rain_collect_any_time.get() and (not start_time or not end_time):
+            message = "Use a valid rain time like 09:30 or 9:30 PM"
+            if hasattr(self, "settings_status_label"):
+                self.settings_status_label.configure(text=message, text_color=COLORS["red2"])
+            self.log(message)
+            return
+
+        self.rain_collect_start_time.set(start_time or "00:00")
+        self.rain_collect_end_time.set(end_time or "23:59")
 
         saved = self.save_data()
         message = "Settings applied" if saved else "Save failed"
@@ -2183,6 +2295,41 @@ try {{
 
         ctk.CTkLabel(
             self.left_panel,
+            text="Rain collection controls",
+            text_color=COLORS["muted"],
+            font=ctk.CTkFont(size=12),
+        ).pack(anchor="w", padx=18, pady=(0, 16))
+
+        self.add_setting(
+            "Rain Collection Chance",
+            self.rain_collect_chance,
+            0,
+            100,
+            command=self.set_rain_collect_chance,
+        )
+
+        self.rain_collect_any_time_switch = ctk.CTkSwitch(
+            self.left_panel,
+            text="COLLECT ANY TIME",
+            variable=self.rain_collect_any_time,
+            command=self.apply_rain_settings,
+            onvalue=True,
+            offvalue=False,
+            fg_color="#3a3a3a",
+            progress_color=COLORS["green"],
+            button_color="#d8d2ca",
+            button_hover_color="#ffffff",
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        self.rain_collect_any_time_switch.pack(anchor="w", padx=18, pady=(2, 10))
+
+        self.add_rain_time_window_setting()
+
+        ctk.CTkFrame(self.left_panel, height=1, fg_color="#24201d").pack(fill="x", padx=18, pady=14)
+
+        ctk.CTkLabel(
+            self.left_panel,
             text="Weather station controls",
             text_color=COLORS["muted"],
             font=ctk.CTkFont(size=12),
@@ -2235,11 +2382,11 @@ try {{
             self.add_setting("Move Steps", self.move_steps, 10, 250)
             self.add_setting("Weather Station Check Interval", self.weather_station_interval, 10, 90)
 
-            BanditButton(
-                self.left_panel,
-                text="APPLY",
-                command=self.apply_rain_settings,
-            ).pack(fill="x", padx=18, pady=(12, 6))
+        BanditButton(
+            self.left_panel,
+            text="APPLY",
+            command=self.apply_rain_settings,
+        ).pack(fill="x", padx=18, pady=(12, 6))
 
         self.settings_status_label = ctk.CTkLabel(
             self.left_panel,
@@ -2635,6 +2782,52 @@ try {{
 
         if hasattr(self, "status_pill"):
             self.status_pill.configure(text=status_text, fg_color=status_color)
+
+    def add_rain_time_window_setting(self):
+        box = ctk.CTkFrame(self.left_panel, fg_color="#111411", corner_radius=12)
+        box.pack(fill="x", padx=14, pady=8)
+        box.grid_columnconfigure((0, 1), weight=1, uniform="rain_time")
+
+        ctk.CTkLabel(
+            box,
+            text="COLLECT BETWEEN",
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 6))
+
+        ctk.CTkLabel(
+            box,
+            text="START",
+            text_color=COLORS["muted"],
+            font=ctk.CTkFont(size=10, weight="bold"),
+        ).grid(row=1, column=0, sticky="w", padx=(12, 6), pady=(0, 2))
+
+        ctk.CTkLabel(
+            box,
+            text="END",
+            text_color=COLORS["muted"],
+            font=ctk.CTkFont(size=10, weight="bold"),
+        ).grid(row=1, column=1, sticky="w", padx=(6, 12), pady=(0, 2))
+
+        ctk.CTkEntry(
+            box,
+            textvariable=self.rain_collect_start_time,
+            height=30,
+            fg_color="#070807",
+            border_color="#30251f",
+            text_color=COLORS["text"],
+            placeholder_text="00:00",
+        ).grid(row=2, column=0, sticky="ew", padx=(12, 6), pady=(0, 12))
+
+        ctk.CTkEntry(
+            box,
+            textvariable=self.rain_collect_end_time,
+            height=30,
+            fg_color="#070807",
+            border_color="#30251f",
+            text_color=COLORS["text"],
+            placeholder_text="23:59",
+        ).grid(row=2, column=1, sticky="ew", padx=(6, 12), pady=(0, 12))
 
     def add_setting(self, label, variable, min_v, max_v, command=None):
         box = ctk.CTkFrame(self.left_panel, fg_color="#111411", corner_radius=12)
@@ -3145,6 +3338,14 @@ try {{
 
                     self.log(f"Found target | X={x} Y={y} confidence={score:.3f}")
 
+                    allowed, skip_reason = self.rain_collection_allowed(x, y)
+                    if not allowed:
+                        self.last_action = skip_reason
+                        self.after(0, self.save_stats)
+                        self.log(skip_reason)
+                        time.sleep(2)
+                        continue
+
                     move_cursor_smooth(
                         x,
                         y,
@@ -3156,6 +3357,7 @@ try {{
                         break
 
                     pyautogui.click(x, y)
+                    self.chance_skipped_rain_target = None
                     self.total_rains_clicked += 1
                     self.current_session_rains_clicked += 1
                     self.last_action = "Clicked target"
@@ -3176,6 +3378,7 @@ try {{
 
                     time.sleep(2)
                 else:
+                    self.chance_skipped_rain_target = None
                     self.log("Not found")
 
             except Exception as e:
