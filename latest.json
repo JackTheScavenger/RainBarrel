@@ -1,6 +1,6 @@
 {
-  "version": "1.1.1",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.1/RainBarrel.exe",
-  "sha256": "ce48e79e7f3e91bf9d4dc053ee3755ca7daabdf27047f69749152c66f322f1d1",
-  "notes": ""
+  "version": "1.1.2",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.2/RainBarrel.exe",
+  "sha256": "0c7e3ce27cd9db059dfe16d1dfefdbe8329f0eff2e1c99776c911b88a9671c35",
+  "notes": "Updated Rain UI, weather station function, and added more rain stat tracking to prep for rain amount prediction"
 }
