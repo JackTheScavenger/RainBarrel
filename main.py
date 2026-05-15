@@ -15,6 +15,7 @@ import threading
 import tempfile
 import urllib.error
 import urllib.request
+import webbrowser
 import winsound
 import wave
 from datetime import datetime
@@ -36,12 +37,11 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # Auto open daily case
 # Randomize constants
 # Add rain prediction
-# Add button to open bandit website (and a toggle to open when app opens if not already open)
 
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -235,6 +235,23 @@ def parse_rain_reward_amount(text):
         return None
 
 
+def parse_scrap_number(value):
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        return round(float(value), 2)
+
+    match = re.search(r"([0-9]+(?:[.,][0-9]+)?)", str(value))
+    if not match:
+        return None
+
+    try:
+        return round(float(match.group(1).replace(",", ".")), 2)
+    except ValueError:
+        return None
+
+
 def count_rain_result_named_users(names_text):
     title_match = list(re.finditer(r"\brakeback\s+rain\s+", names_text, flags=re.IGNORECASE))
     if title_match:
@@ -283,11 +300,7 @@ def parse_rain_result_summary(text):
         normalized,
         re.IGNORECASE,
     )
-    total_tipped = (
-        float(tipped_match.group("tipped").replace(",", "."))
-        if tipped_match
-        else total_claimed
-    )
+    total_tipped = parse_scrap_number(tipped_match.group("tipped")) if tipped_match else None
 
     if people_joined <= 0 or total_claimed <= 0:
         return None
@@ -295,7 +308,7 @@ def parse_rain_result_summary(text):
     return {
         "people_joined": int(people_joined),
         "total_scrap_claimed": round(total_claimed, 2),
-        "total_tipped": round(total_tipped, 2),
+        "total_tipped": total_tipped,
     }
 
 
@@ -826,6 +839,41 @@ def set_windows_app_user_model_id():
         pass
 
 
+def bandit_appears_open_in_window_titles():
+    if sys.platform != "win32":
+        return False
+
+    user32 = ctypes.windll.user32
+    titles = []
+
+    def enum_window(hwnd, _):
+        try:
+            if not user32.IsWindowVisible(hwnd):
+                return True
+
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buffer, length + 1)
+            title = buffer.value.strip().lower()
+            if title:
+                titles.append(title)
+        except Exception:
+            pass
+
+        return True
+
+    enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(enum_window)
+    try:
+        user32.EnumWindows(enum_proc, 0)
+    except Exception:
+        return False
+
+    return any("bandit" in title and ("camp" in title or "bandit.camp" in title) for title in titles)
+
+
 # ================= APP =================
 
 class App(ctk.CTk):
@@ -884,6 +932,9 @@ class App(ctk.CTk):
         self.weather_station_warn_before_open = ctk.BooleanVar(
             value=saved_settings.get("weather_station_warn_before_open", True)
         )
+        self.open_bandit_on_startup = ctk.BooleanVar(
+            value=saved_settings.get("open_bandit_on_startup", False)
+        )
         self.battle_minimum_discount = ctk.DoubleVar(
             value=saved_settings.get("battle_minimum_discount", 100.0)
         )
@@ -941,6 +992,8 @@ class App(ctk.CTk):
         self.bg_job = None
         self.hourly_chart_canvas = None
         self.chance_skipped_rain_target = None
+        self.pending_rain_total_tipped = None
+        self.pending_rain_total_tipped_at = None
         self.rain_log_entries = []
         self.rain_scan_found_last_check = None
 
@@ -953,6 +1006,7 @@ class App(ctk.CTk):
         self.stat_value_labels = {}
         self.active_stats_page = "Rain"
         self.after(500, self.refresh_stats_live)
+        self.after(900, self.open_bandit_on_startup_if_enabled)
         self.after(1500, self.check_for_updates_on_startup)
 
     def apply_window_icon(self):
@@ -1476,6 +1530,7 @@ try {{
             "weather_station_interval": int(self.weather_station_interval.get()),
             "weather_notification_volume": int(self.weather_notification_volume.get()),
             "weather_station_warn_before_open": bool(self.weather_station_warn_before_open.get()),
+            "open_bandit_on_startup": bool(self.open_bandit_on_startup.get()),
             "battle_minimum_discount": round(float(self.battle_minimum_discount.get()), 1),
             "battle_free_cases_only": bool(self.battle_free_cases_only.get()),
             "rain_chart_mode": self.get_rain_chart_mode(),
@@ -1538,7 +1593,6 @@ try {{
                 datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
                 people_joined = int(item.get("people_joined"))
                 total_scrap_claimed = round(float(item.get("total_scrap_claimed")), 2)
-                total_tipped = round(float(item.get("total_tipped", total_scrap_claimed)), 2)
                 your_reward = round(float(item.get("your_reward", 0.0)), 2)
             except (TypeError, ValueError):
                 continue
@@ -1546,6 +1600,7 @@ try {{
             if people_joined <= 0 or total_scrap_claimed <= 0:
                 continue
 
+            total_tipped = parse_scrap_number(item.get("total_tipped"))
             cleaned.append(
                 {
                     "time": timestamp,
@@ -1729,6 +1784,48 @@ try {{
         self.sync_rain_time_window_controls()
         self.apply_rain_settings()
 
+    def show_rain_settings_message(self, message, color=None):
+        if hasattr(self, "settings_status_label"):
+            self.settings_status_label.configure(
+                text=message,
+                text_color=color or COLORS["muted"],
+            )
+
+    def open_bandit_website(self, auto=False):
+        if auto and not self.open_bandit_on_startup.get():
+            return False
+
+        if bandit_appears_open_in_window_titles():
+            message = "Bandit.camp already appears open"
+            self.show_rain_settings_message(message, COLORS["muted"])
+            self.log(message)
+            return False
+
+        try:
+            opened = webbrowser.open(BANDIT_CAMP_URL, new=2)
+        except Exception as e:
+            message = f"Could not open Bandit.camp: {e.__class__.__name__}"
+            self.show_rain_settings_message(message, COLORS["red2"])
+            self.log(message)
+            return False
+
+        message = "Opened Bandit.camp" if opened else "Sent Bandit.camp open request"
+        self.show_rain_settings_message(message, COLORS["green"])
+        self.log(message)
+        return True
+
+    def open_bandit_on_startup_if_enabled(self):
+        self.open_bandit_website(auto=True)
+
+    def toggle_open_bandit_on_startup(self):
+        saved = self.save_data()
+        message = "Bandit startup setting saved" if saved else "Save failed"
+        self.show_rain_settings_message(
+            message,
+            COLORS["green"] if saved else COLORS["red2"],
+        )
+        self.log(message)
+
     def get_total_search_time_seconds(self):
         if self.running and self.current_session_started_at is not None:
             return self.total_search_time_seconds + (time.time() - self.current_session_started_at)
@@ -1830,57 +1927,14 @@ try {{
     def format_rain_amount_per_hour(self, amount):
         return f"{self.format_rain_amount(amount)}/H"
 
-    def format_percent(self, value):
-        try:
-            value = float(value)
-        except (TypeError, ValueError):
-            return "0%"
-
-        return f"{value:.2f}%"
-
-    def get_total_rain_result_tipped(self):
-        return sum(float(item.get("total_tipped", 0.0)) for item in self.rain_result_history)
-
-    def get_total_rain_result_people(self):
-        return sum(int(item.get("people_joined", 0)) for item in self.rain_result_history)
-
-    def get_total_rain_result_claimed(self):
-        return sum(float(item.get("total_scrap_claimed", 0.0)) for item in self.rain_result_history)
-
-    def get_total_rain_result_your_reward(self):
-        return sum(float(item.get("your_reward", 0.0)) for item in self.rain_result_history)
-
-    def get_last_rain_result(self):
-        if not self.rain_result_history:
-            return None
-
-        return self.rain_result_history[-1]
-
-    def format_rain_result_comparison(self, item):
-        if not item:
+    def format_optional_rain_amount(self, amount):
+        if amount is None or amount == "":
             return "--"
 
-        total_scrap = float(item.get("total_scrap_claimed", 0.0))
-        people_joined = int(item.get("people_joined", 0))
-        your_reward = float(item.get("your_reward", 0.0))
-        if total_scrap <= 0 or people_joined <= 0:
-            return "--"
+        return self.format_rain_amount(amount)
 
-        average = total_scrap / people_joined
-        difference = your_reward - average
-        share = (your_reward / total_scrap) * 100
-        direction = "above" if difference >= 0 else "below"
-
-        return (
-            f"You {self.format_rain_amount(your_reward)} | avg "
-            f"{self.format_rain_amount(average)} | "
-            f"{self.format_rain_amount(abs(difference))} {direction} avg | "
-            f"{self.format_percent(share)} of total"
-        )
-
-    def get_hourly_rain_totals(self):
-        hourly_sums = [0.0] * 24
-        hourly_counts = [0] * 24
+    def get_hourly_rain_values(self):
+        hourly_values = [[] for _ in range(24)]
 
         for item in self.rain_reward_history:
             if not isinstance(item, dict):
@@ -1897,10 +1951,17 @@ try {{
             except (TypeError, ValueError):
                 continue
 
-            hourly_sums[hour] += value
-            hourly_counts[hour] += 1
+            hourly_values[hour].append(value)
 
-        return hourly_sums, hourly_counts
+        return hourly_values
+
+    def get_typical_hourly_value(self, values):
+        if not values:
+            return None
+
+        values = sorted(values)
+        midpoint = (len(values) - 1) // 2
+        return values[midpoint]
 
     def format_hour_label(self, hour):
         suffix = "AM" if hour < 12 else "PM"
@@ -1926,16 +1987,10 @@ try {{
             self.draw_hourly_rain_chart(self.hourly_chart_canvas)
 
     def get_hourly_rain_averages(self):
-        totals, counts = self.get_hourly_rain_totals()
-        averages = []
-
-        for hour in range(24):
-            if counts[hour]:
-                averages.append(totals[hour] / counts[hour])
-            else:
-                averages.append(None)
-
-        return averages
+        return [
+            self.get_typical_hourly_value(values)
+            for values in self.get_hourly_rain_values()
+        ]
 
     def build_hourly_rain_chart(self, parent):
         card = ctk.CTkFrame(
@@ -1949,7 +2004,7 @@ try {{
 
         ctk.CTkLabel(
             card,
-            text="AVERAGE RAIN COLLECTED BY HOUR",
+            text="TYPICAL RAIN COLLECTED BY HOUR",
             text_color=COLORS["red2"],
             font=ctk.CTkFont(family="Impact", size=26),
         ).pack(anchor="w", padx=26, pady=(18, 10))
@@ -2230,11 +2285,16 @@ try {{
 
     def record_rain_result(self, summary, your_reward):
         now = datetime.now()
+        total_tipped = summary.get("total_tipped")
+        if total_tipped is None and self.pending_rain_total_tipped is not None:
+            if self.pending_rain_total_tipped_at is None or time.time() - self.pending_rain_total_tipped_at < RAIN_REWARD_WATCH_SECONDS:
+                total_tipped = self.pending_rain_total_tipped
+
         item = {
             "time": now.strftime("%Y-%m-%d %H:%M:%S"),
             "people_joined": int(summary["people_joined"]),
             "total_scrap_claimed": round(float(summary["total_scrap_claimed"]), 2),
-            "total_tipped": round(float(summary.get("total_tipped", summary["total_scrap_claimed"])), 2),
+            "total_tipped": parse_scrap_number(total_tipped),
             "your_reward": round(float(your_reward), 2),
         }
 
@@ -2244,9 +2304,10 @@ try {{
         self.save_stats()
         self.log(
             "Tracked rain result: "
-            f"{item['people_joined']} people claimed "
-            f"{self.format_rain_amount(item['total_scrap_claimed'])} scrap | "
-            f"{self.format_rain_result_comparison(item)}"
+            f"{item['people_joined']} people | "
+            f"tipped {self.format_optional_rain_amount(item['total_tipped'])} | "
+            f"collected {self.format_rain_amount(item['total_scrap_claimed'])} | "
+            f"you got {self.format_rain_amount(item['your_reward'])}"
         )
         if self.current_page == "Stats" and self.active_stats_page == "Rain":
             self.stats_page("Rain")
@@ -2637,6 +2698,28 @@ try {{
 
         BanditButton(
             self.left_panel,
+            text="OPEN BANDIT.CAMP",
+            command=self.open_bandit_website,
+        ).pack(fill="x", padx=18, pady=(0, 8))
+
+        self.open_bandit_startup_switch = ctk.CTkSwitch(
+            self.left_panel,
+            text="OPEN BANDIT ON STARTUP",
+            variable=self.open_bandit_on_startup,
+            command=self.toggle_open_bandit_on_startup,
+            onvalue=True,
+            offvalue=False,
+            fg_color="#3a3a3a",
+            progress_color=COLORS["green"],
+            button_color="#d8d2ca",
+            button_hover_color="#ffffff",
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        self.open_bandit_startup_switch.pack(anchor="w", padx=18, pady=(0, 12))
+
+        BanditButton(
+            self.left_panel,
             text="CHECK FOR UPDATES",
             command=lambda: self.check_for_updates(silent=False),
         ).pack(fill="x", padx=18, pady=(0, 8))
@@ -2910,6 +2993,10 @@ try {{
                                     duration = int(payload.get("duration", 0))
                                     rain_active_until_ms = started_at + duration
                                     rain_value = payload.get("value")
+                                    parsed_rain_value = parse_scrap_number(rain_value)
+                                    if parsed_rain_value is not None:
+                                        self.pending_rain_total_tipped = parsed_rain_value
+                                        self.pending_rain_total_tipped_at = time.time()
                                     rain_user_count = payload.get("userCount")
                                     rain_notification_key = f"weather_rain:{started_at}"
                                 elif event_type == "user_count":
@@ -3247,14 +3334,6 @@ try {{
 
     def get_stats_sections(self, stat_page):
         if stat_page == "Rain":
-            last_result = self.get_last_rain_result()
-            total_everyone_claimed = self.get_total_rain_result_claimed()
-            total_tracked_reward = self.get_total_rain_result_your_reward()
-            total_share = (
-                (total_tracked_reward / total_everyone_claimed) * 100
-                if total_everyone_claimed > 0
-                else 0.0
-            )
             return [
                 (
                     "TOTAL RAIN STATS",
@@ -3268,27 +3347,6 @@ try {{
                         ),
                         ("Last Rain Reward", self.format_rain_amount(self.last_rain_reward)),
                         ("Last Rain Detected", self.format_last_rain_detected()),
-                    ],
-                ),
-                (
-                    "RAIN RESULT TRACKING",
-                    [
-                        ("Tracked Rain Results", str(len(self.rain_result_history))),
-                        ("Total Tipped", self.format_rain_amount(self.get_total_rain_result_tipped())),
-                        ("Total People Joined", str(self.get_total_rain_result_people())),
-                        ("Total Everyone Claimed", self.format_rain_amount(total_everyone_claimed)),
-                        ("Your Tracked Share", self.format_percent(total_share)),
-                        (
-                            "Last Everyone Claimed",
-                            self.format_rain_amount(last_result.get("total_scrap_claimed", 0.0))
-                            if last_result
-                            else "--",
-                        ),
-                        (
-                            "Last People Joined",
-                            str(last_result.get("people_joined", 0)) if last_result else "--",
-                        ),
-                        ("Last Comparison", self.format_rain_result_comparison(last_result)),
                     ],
                 ),
                 (
@@ -3410,7 +3468,74 @@ try {{
                 self.stat_value_labels[label] = value_label
 
         if stat_page == "Rain":
+            self.build_rain_result_log(scroll)
             self.build_hourly_rain_chart(scroll)
+
+    def build_rain_result_log(self, parent):
+        card = ctk.CTkFrame(
+            parent,
+            fg_color="#151412",
+            border_color="#2f1d18",
+            border_width=1,
+            corner_radius=10,
+        )
+        card.pack(fill="x", padx=34, pady=12)
+
+        ctk.CTkLabel(
+            card,
+            text="RAIN RESULT LOG",
+            text_color=COLORS["red2"],
+            font=ctk.CTkFont(family="Impact", size=26),
+        ).pack(anchor="w", padx=26, pady=(18, 10))
+
+        if not self.rain_result_history:
+            ctk.CTkLabel(
+                card,
+                text="No rain result history yet.",
+                text_color=COLORS["muted"],
+                font=ctk.CTkFont(size=13),
+            ).pack(anchor="w", padx=26, pady=(0, 22))
+            return
+
+        table = ctk.CTkFrame(card, fg_color="transparent")
+        table.pack(fill="x", padx=18, pady=(0, 18))
+        for index, weight in enumerate((2, 1, 1, 1, 1)):
+            table.grid_columnconfigure(index, weight=weight, uniform="rain_result")
+
+        headers = ["TIME", "PEOPLE", "TIPPED", "COLLECTED", "MINE"]
+        for column, header in enumerate(headers):
+            ctk.CTkLabel(
+                table,
+                text=header,
+                text_color=COLORS["muted"],
+                font=ctk.CTkFont(size=11, weight="bold"),
+            ).grid(row=0, column=column, sticky="w", padx=8, pady=(0, 6))
+
+        for row_index, item in enumerate(reversed(self.rain_result_history[-20:]), start=1):
+            try:
+                timestamp = datetime.strptime(item.get("time", ""), "%Y-%m-%d %H:%M:%S")
+                display_time = timestamp.strftime("%m/%d %I:%M %p").replace(" 0", " ")
+            except (TypeError, ValueError):
+                display_time = str(item.get("time", "--"))
+
+            values = [
+                display_time,
+                str(item.get("people_joined", "--")),
+                self.format_optional_rain_amount(item.get("total_tipped")),
+                self.format_rain_amount(item.get("total_scrap_claimed", 0.0)),
+                self.format_rain_amount(item.get("your_reward", 0.0)),
+            ]
+            row_color = "#1b1815" if row_index % 2 else "transparent"
+
+            for column, value in enumerate(values):
+                cell = ctk.CTkFrame(table, fg_color=row_color, corner_radius=6)
+                cell.grid(row=row_index, column=column, sticky="ew", padx=2, pady=2)
+                ctk.CTkLabel(
+                    cell,
+                    text=value,
+                    text_color=COLORS["text"] if column == 0 else COLORS["red2"],
+                    font=ctk.CTkFont(size=12, weight="bold" if column > 0 else "normal"),
+                ).pack(anchor="w", padx=6, pady=5)
 
     # ================= LOGGING =================
 
