@@ -1,6 +1,6 @@
 {
-  "version": "1.1.3",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.3/RainBarrel.exe",
-  "sha256": "23edde3c2cd14a2f8b6bf3bdfe03d117d48c5013a6337b64137b299b4f15d3a6",
-  "notes": "Fixed Rain settings startup crash caused by disabled time input styling."
+  "version": "1.1.4",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.4/RainBarrel.exe",
+  "sha256": "2a3aefd7f50f5f001c9c6b0b479ba540e4aaa311e930ad9ebb7c933b3bdc7e5b",
+  "notes": "Added Bandit.camp open button and startup toggle, updated rain result logging, and made hourly rain stats less skewed."
 }
