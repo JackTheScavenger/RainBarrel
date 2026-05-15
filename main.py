@@ -41,7 +41,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -3022,10 +3022,8 @@ try {{
             textvariable=self.rain_collect_start_time,
             height=30,
             fg_color="#070807",
-            disabled_fg_color="#151816",
             border_color="#30251f",
             text_color=COLORS["text"],
-            text_color_disabled=COLORS["muted"],
             placeholder_text="00:00",
         )
         self.rain_collect_start_entry.grid(row=2, column=0, sticky="ew", padx=(12, 6), pady=(0, 12))
@@ -3035,10 +3033,8 @@ try {{
             textvariable=self.rain_collect_end_time,
             height=30,
             fg_color="#070807",
-            disabled_fg_color="#151816",
             border_color="#30251f",
             text_color=COLORS["text"],
-            text_color_disabled=COLORS["muted"],
             placeholder_text="23:59",
         )
         self.rain_collect_end_entry.grid(row=2, column=1, sticky="ew", padx=(6, 12), pady=(0, 12))
@@ -3047,10 +3043,17 @@ try {{
     def sync_rain_time_window_controls(self):
         state = "disabled" if self.rain_collect_any_time.get() else "normal"
         border_color = "#24201d" if state == "disabled" else "#30251f"
+        fg_color = "#151816" if state == "disabled" else "#070807"
+        text_color = COLORS["muted"] if state == "disabled" else COLORS["text"]
 
         for entry_name in ("rain_collect_start_entry", "rain_collect_end_entry"):
             if hasattr(self, entry_name):
-                getattr(self, entry_name).configure(state=state, border_color=border_color)
+                getattr(self, entry_name).configure(
+                    state=state,
+                    border_color=border_color,
+                    fg_color=fg_color,
+                    text_color=text_color,
+                )
 
     def add_setting(self, label, variable, min_v, max_v, command=None):
         box = ctk.CTkFrame(self.left_panel, fg_color="#111411", corner_radius=12)
