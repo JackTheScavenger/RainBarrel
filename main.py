@@ -33,9 +33,10 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # Password system/accounts which i activate
 # Free battle joiner
 # Discount battle joiner
-# 3 cent collector/gambler
-# Increase scan scroller limit
 # Auto open daily case
+# Randomize constants
+# Add rain prediction
+# Add button to open bandit website (and a toggle to open when app opens if not already open)
 
 # ================= CONFIG =================
 
@@ -1091,8 +1092,10 @@ class App(ctk.CTk):
             )
             return
 
+        dialog_width = 540
+        dialog_height = 340
         dialog = ctk.CTkToplevel(self)
-        dialog.geometry("500x300")
+        dialog.geometry(f"{dialog_width}x{dialog_height}")
         dialog.resizable(False, False)
         dialog.title("Update Available")
         dialog.transient(self)
@@ -1101,9 +1104,9 @@ class App(ctk.CTk):
 
         self.update_idletasks()
         dialog.update_idletasks()
-        x = self.winfo_x() + (self.winfo_width() - 500) // 2
-        y = self.winfo_y() + (self.winfo_height() - 300) // 2
-        dialog.geometry(f"500x300+{max(x, 0)}+{max(y, 0)}")
+        x = self.winfo_x() + (self.winfo_width() - dialog_width) // 2
+        y = self.winfo_y() + (self.winfo_height() - dialog_height) // 2
+        dialog.geometry(f"{dialog_width}x{dialog_height}+{max(x, 0)}+{max(y, 0)}")
         dialog.lift()
         dialog.attributes("-topmost", True)
         dialog.after(1200, lambda: dialog.attributes("-topmost", False))
@@ -1129,7 +1132,7 @@ class App(ctk.CTk):
             text=f"Version {version} is available. You are running {APP_VERSION}.",
             text_color=COLORS["text"],
             font=ctk.CTkFont(size=14, weight="bold"),
-            wraplength=430,
+            wraplength=455,
             justify="left",
         ).pack(anchor="w", padx=22, pady=(0, 10))
 
@@ -1139,9 +1142,9 @@ class App(ctk.CTk):
             text=notes_text,
             text_color=COLORS["muted"],
             font=ctk.CTkFont(size=12),
-            wraplength=430,
+            wraplength=455,
             justify="left",
-        ).pack(anchor="w", padx=22)
+        ).pack(anchor="w", fill="x", padx=22, pady=(0, 2))
 
         self.update_progress = ctk.CTkProgressBar(
             shell,
