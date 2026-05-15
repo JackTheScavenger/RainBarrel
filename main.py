@@ -4,6 +4,7 @@ import io
 import asyncio
 import ctypes
 import hashlib
+import importlib
 import math
 import re
 import subprocess
@@ -39,7 +40,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -88,6 +89,8 @@ SELENIUM_PAGE_WAIT = 45
 RAIN_REWARD_WATCH_SECONDS = 45 * 60
 RAIN_REWARD_SCAN_INTERVAL_SECONDS = 3
 RAIN_REWARD_HISTORY_LIMIT = 100
+RAIN_LOG_HISTORY_LIMIT = 500
+RAIN_RESULT_MIN_WAIT_AFTER_REWARD_SECONDS = 10
 BATTLE_SCAN_INTERVAL_SECONDS = 2.5
 BATTLE_CLICK_OFFSET_X = 260
 BATTLE_CLICK_OFFSET_Y = 0
@@ -198,7 +201,7 @@ def page_has_active_rain_event(page):
         "join rain event",
         "claim rain",
         "collect rain",
-        "rain ends",
+        "rain ends in",
     ]
 
     return any(marker in page for marker in active_markers)
@@ -231,6 +234,70 @@ def parse_rain_reward_amount(text):
         return None
 
 
+def count_rain_result_named_users(names_text):
+    title_match = list(re.finditer(r"\brakeback\s+rain\s+", names_text, flags=re.IGNORECASE))
+    if title_match:
+        names_text = names_text[title_match[-1].end():]
+    else:
+        names_text = re.sub(r"^[\s\W]*(?:rain)\b", "", names_text, flags=re.IGNORECASE)
+
+    names_text = re.sub(r"[\r\n]+", " ", names_text)
+    names_text = re.sub(r"\s+", " ", names_text).strip(" ,.:;")
+    if not names_text:
+        return 0
+
+    rough_parts = re.split(r"\s*,\s*|\s+\band\b\s+|\s*\.\s+", names_text, flags=re.IGNORECASE)
+    parts = [part.strip(" ,.:;*#") for part in rough_parts if part.strip(" ,.:;*#")]
+
+    return len(parts)
+
+
+def parse_rain_result_summary(text):
+    normalized = re.sub(r"\s+", " ", text)
+    match = re.search(
+        r"(?P<names>.*?)\s+and\s+(?P<others>\d+)\s+other\s+bandits?\s+claimed\s+"
+        r"(?P<claimed>[0-9]+(?:[.,][0-9]+)?)\s+from\s+rain\b",
+        normalized,
+        re.IGNORECASE,
+    )
+
+    if match:
+        named_count = count_rain_result_named_users(match.group("names"))
+        people_joined = named_count + int(match.group("others"))
+        total_claimed = float(match.group("claimed").replace(",", "."))
+    else:
+        match = re.search(
+            r"(?P<names>.*?)\s+claimed\s+(?P<claimed>[0-9]+(?:[.,][0-9]+)?)\s+from\s+rain\b",
+            normalized,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+
+        people_joined = count_rain_result_named_users(match.group("names"))
+        total_claimed = float(match.group("claimed").replace(",", "."))
+
+    tipped_match = re.search(
+        r"\btipped\s+(?P<tipped>[0-9]+(?:[.,][0-9]+)?)\b",
+        normalized,
+        re.IGNORECASE,
+    )
+    total_tipped = (
+        float(tipped_match.group("tipped").replace(",", "."))
+        if tipped_match
+        else total_claimed
+    )
+
+    if people_joined <= 0 or total_claimed <= 0:
+        return None
+
+    return {
+        "people_joined": int(people_joined),
+        "total_scrap_claimed": round(total_claimed, 2),
+        "total_tipped": round(total_tipped, 2),
+    }
+
+
 def capture_all_monitors_image():
     with mss.mss() as sct:
         monitor = sct.monitors[0]
@@ -241,9 +308,13 @@ def capture_all_monitors_image():
 
 
 async def ocr_image_with_windows(image):
-    from winrt.windows.graphics.imaging import BitmapDecoder
-    from winrt.windows.media.ocr import OcrEngine
-    from winrt.windows.storage.streams import DataWriter, InMemoryRandomAccessStream
+    imaging = importlib.import_module("winrt.windows.graphics.imaging")
+    ocr = importlib.import_module("winrt.windows.media.ocr")
+    streams = importlib.import_module("winrt.windows.storage.streams")
+    BitmapDecoder = imaging.BitmapDecoder
+    OcrEngine = ocr.OcrEngine
+    DataWriter = streams.DataWriter
+    InMemoryRandomAccessStream = streams.InMemoryRandomAccessStream
 
     buffer = io.BytesIO()
     image.convert("RGB").save(buffer, format="PNG")
@@ -280,6 +351,23 @@ def read_rain_reward_amount_from_screen():
         return None, "Rain reward popup not visible yet"
 
     return amount, f"Read reward popup: {amount:.2f} scrap"
+
+
+def read_rain_screen_details():
+    try:
+        screenshot = capture_all_monitors_image()
+        text = asyncio.run(ocr_image_with_windows(screenshot))
+    except (ImportError, ModuleNotFoundError):
+        return None, None, "Windows OCR packages are not installed"
+    except Exception as e:
+        return None, None, f"OCR failed: {e.__class__.__name__}"
+
+    reward = parse_rain_reward_amount(text)
+    result = parse_rain_result_summary(text)
+    if reward is not None or result is not None:
+        return reward, result, "Read rain screen details"
+
+    return None, None, "Rain reward/result text not visible yet"
 
 
 def parse_battle_discount(text):
@@ -825,6 +913,10 @@ class App(ctk.CTk):
         if not isinstance(self.rain_reward_history, list):
             self.rain_reward_history = []
         self.rain_reward_history = self.clean_rain_reward_history(self.rain_reward_history)
+        self.rain_result_history = saved_stats.get("rain_result_history", [])
+        if not isinstance(self.rain_result_history, list):
+            self.rain_result_history = []
+        self.rain_result_history = self.clean_rain_result_history(self.rain_result_history)
         self.rain_reward_tracker_active = False
         self.rain_reward_lock = threading.Lock()
         self.current_session_seconds = 0.0
@@ -848,6 +940,8 @@ class App(ctk.CTk):
         self.bg_job = None
         self.hourly_chart_canvas = None
         self.chance_skipped_rain_target = None
+        self.rain_log_entries = []
+        self.rain_scan_found_last_check = None
 
         self.build_ui()
         self.show_page("Rain")
@@ -1391,6 +1485,7 @@ try {{
             "total_rain_collected": round(self.total_rain_collected, 2),
             "last_rain_reward": round(self.last_rain_reward, 2),
             "rain_reward_history": self.rain_reward_history[-RAIN_REWARD_HISTORY_LIMIT:],
+            "rain_result_history": self.rain_result_history[-RAIN_REWARD_HISTORY_LIMIT:],
             "current_session_seconds": round(self.get_current_session_seconds(), 1),
             "current_session_rains_clicked": int(self.current_session_rains_clicked),
             "current_session_rain_collected": round(self.current_session_rain_collected, 2),
@@ -1425,6 +1520,38 @@ try {{
                 continue
 
             cleaned.append({"time": str(timestamp), "amount": amount})
+
+        return cleaned[-RAIN_REWARD_HISTORY_LIMIT:]
+
+    def clean_rain_result_history(self, history):
+        cleaned = []
+
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+
+            try:
+                timestamp = str(item.get("time"))
+                datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+                people_joined = int(item.get("people_joined"))
+                total_scrap_claimed = round(float(item.get("total_scrap_claimed")), 2)
+                total_tipped = round(float(item.get("total_tipped", total_scrap_claimed)), 2)
+                your_reward = round(float(item.get("your_reward", 0.0)), 2)
+            except (TypeError, ValueError):
+                continue
+
+            if people_joined <= 0 or total_scrap_claimed <= 0:
+                continue
+
+            cleaned.append(
+                {
+                    "time": timestamp,
+                    "people_joined": people_joined,
+                    "total_scrap_claimed": total_scrap_claimed,
+                    "total_tipped": total_tipped,
+                    "your_reward": your_reward,
+                }
+            )
 
         return cleaned[-RAIN_REWARD_HISTORY_LIMIT:]
 
@@ -1545,6 +1672,7 @@ try {{
 
         self.rain_collect_start_time.set(start_time or "00:00")
         self.rain_collect_end_time.set(end_time or "23:59")
+        self.sync_rain_time_window_controls()
 
         saved = self.save_data()
         message = "Settings applied" if saved else "Save failed"
@@ -1593,6 +1721,10 @@ try {{
             args=(self.weather_notification_volume.get(),),
             daemon=True,
         ).start()
+
+    def toggle_rain_collect_any_time(self):
+        self.sync_rain_time_window_controls()
+        self.apply_rain_settings()
 
     def get_total_search_time_seconds(self):
         if self.running and self.current_session_started_at is not None:
@@ -1694,6 +1826,54 @@ try {{
 
     def format_rain_amount_per_hour(self, amount):
         return f"{self.format_rain_amount(amount)}/H"
+
+    def format_percent(self, value):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return "0%"
+
+        return f"{value:.2f}%"
+
+    def get_total_rain_result_tipped(self):
+        return sum(float(item.get("total_tipped", 0.0)) for item in self.rain_result_history)
+
+    def get_total_rain_result_people(self):
+        return sum(int(item.get("people_joined", 0)) for item in self.rain_result_history)
+
+    def get_total_rain_result_claimed(self):
+        return sum(float(item.get("total_scrap_claimed", 0.0)) for item in self.rain_result_history)
+
+    def get_total_rain_result_your_reward(self):
+        return sum(float(item.get("your_reward", 0.0)) for item in self.rain_result_history)
+
+    def get_last_rain_result(self):
+        if not self.rain_result_history:
+            return None
+
+        return self.rain_result_history[-1]
+
+    def format_rain_result_comparison(self, item):
+        if not item:
+            return "--"
+
+        total_scrap = float(item.get("total_scrap_claimed", 0.0))
+        people_joined = int(item.get("people_joined", 0))
+        your_reward = float(item.get("your_reward", 0.0))
+        if total_scrap <= 0 or people_joined <= 0:
+            return "--"
+
+        average = total_scrap / people_joined
+        difference = your_reward - average
+        share = (your_reward / total_scrap) * 100
+        direction = "above" if difference >= 0 else "below"
+
+        return (
+            f"You {self.format_rain_amount(your_reward)} | avg "
+            f"{self.format_rain_amount(average)} | "
+            f"{self.format_rain_amount(abs(difference))} {direction} avg | "
+            f"{self.format_percent(share)} of total"
+        )
 
     def get_hourly_rain_totals(self):
         hourly_sums = [0.0] * 24
@@ -1940,6 +2120,7 @@ try {{
         self.total_rain_collected = 0.0
         self.last_rain_reward = 0.0
         self.rain_reward_history = []
+        self.rain_result_history = []
         self.last_weather_notification_key = None
         self.last_rain_time = "--"
         self.last_action = "--"
@@ -1991,18 +2172,34 @@ try {{
     def rain_reward_tracker_worker(self):
         deadline = time.time() + RAIN_REWARD_WATCH_SECONDS
         last_detail = None
+        own_reward = None
+        reward_found_at = None
+        tracked_result = False
 
         try:
             while time.time() < deadline:
-                amount, detail = read_rain_reward_amount_from_screen()
-                if amount is not None:
-                    self.after(0, lambda value=amount: self.record_rain_reward(value))
+                amount, result, detail = read_rain_screen_details()
+                if amount is not None and own_reward is None:
+                    own_reward = round(float(amount), 2)
+                    reward_found_at = time.time()
+                    self.after(0, lambda value=own_reward: self.record_rain_reward(value))
+
+                result_wait_finished = (
+                    reward_found_at is not None
+                    and time.time() - reward_found_at >= RAIN_RESULT_MIN_WAIT_AFTER_REWARD_SECONDS
+                )
+                if result is not None and own_reward is not None and result_wait_finished:
+                    self.after(
+                        0,
+                        lambda summary=result, reward=own_reward: self.record_rain_result(summary, reward),
+                    )
+                    tracked_result = True
                     return
 
                 last_detail = detail
                 time.sleep(RAIN_REWARD_SCAN_INTERVAL_SECONDS)
 
-            if last_detail:
+            if last_detail and not tracked_result:
                 self.log(f"Rain reward tracker stopped: {last_detail}")
         finally:
             with self.rain_reward_lock:
@@ -2025,6 +2222,29 @@ try {{
         self.last_action = f"Collected {self.format_rain_amount(amount)} scrap"
         self.save_stats()
         self.log(f"Tracked rain reward: {self.format_rain_amount(amount)} scrap")
+        if self.current_page == "Stats" and self.active_stats_page == "Rain":
+            self.stats_page("Rain")
+
+    def record_rain_result(self, summary, your_reward):
+        now = datetime.now()
+        item = {
+            "time": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "people_joined": int(summary["people_joined"]),
+            "total_scrap_claimed": round(float(summary["total_scrap_claimed"]), 2),
+            "total_tipped": round(float(summary.get("total_tipped", summary["total_scrap_claimed"])), 2),
+            "your_reward": round(float(your_reward), 2),
+        }
+
+        self.rain_result_history.append(item)
+        self.rain_result_history = self.rain_result_history[-RAIN_REWARD_HISTORY_LIMIT:]
+        self.last_action = "Tracked rain result"
+        self.save_stats()
+        self.log(
+            "Tracked rain result: "
+            f"{item['people_joined']} people claimed "
+            f"{self.format_rain_amount(item['total_scrap_claimed'])} scrap | "
+            f"{self.format_rain_result_comparison(item)}"
+        )
         if self.current_page == "Stats" and self.active_stats_page == "Rain":
             self.stats_page("Rain")
 
@@ -2295,41 +2515,6 @@ try {{
 
         ctk.CTkLabel(
             self.left_panel,
-            text="Rain collection controls",
-            text_color=COLORS["muted"],
-            font=ctk.CTkFont(size=12),
-        ).pack(anchor="w", padx=18, pady=(0, 16))
-
-        self.add_setting(
-            "Rain Collection Chance",
-            self.rain_collect_chance,
-            0,
-            100,
-            command=self.set_rain_collect_chance,
-        )
-
-        self.rain_collect_any_time_switch = ctk.CTkSwitch(
-            self.left_panel,
-            text="COLLECT ANY TIME",
-            variable=self.rain_collect_any_time,
-            command=self.apply_rain_settings,
-            onvalue=True,
-            offvalue=False,
-            fg_color="#3a3a3a",
-            progress_color=COLORS["green"],
-            button_color="#d8d2ca",
-            button_hover_color="#ffffff",
-            text_color=COLORS["text"],
-            font=ctk.CTkFont(size=13, weight="bold"),
-        )
-        self.rain_collect_any_time_switch.pack(anchor="w", padx=18, pady=(2, 10))
-
-        self.add_rain_time_window_setting()
-
-        ctk.CTkFrame(self.left_panel, height=1, fg_color="#24201d").pack(fill="x", padx=18, pady=14)
-
-        ctk.CTkLabel(
-            self.left_panel,
             text="Weather station controls",
             text_color=COLORS["muted"],
             font=ctk.CTkFont(size=12),
@@ -2367,6 +2552,41 @@ try {{
             100,
             command=self.preview_weather_notification_volume,
         )
+
+        ctk.CTkFrame(self.left_panel, height=1, fg_color="#24201d").pack(fill="x", padx=18, pady=14)
+
+        ctk.CTkLabel(
+            self.left_panel,
+            text="Rain collection controls",
+            text_color=COLORS["muted"],
+            font=ctk.CTkFont(size=12),
+        ).pack(anchor="w", padx=18, pady=(0, 16))
+
+        self.add_setting(
+            "Rain Collection Chance",
+            self.rain_collect_chance,
+            0,
+            100,
+            command=self.set_rain_collect_chance,
+        )
+
+        self.rain_collect_any_time_switch = ctk.CTkSwitch(
+            self.left_panel,
+            text="COLLECT ANY TIME",
+            variable=self.rain_collect_any_time,
+            command=self.toggle_rain_collect_any_time,
+            onvalue=True,
+            offvalue=False,
+            fg_color="#3a3a3a",
+            progress_color=COLORS["green"],
+            button_color="#d8d2ca",
+            button_hover_color="#ffffff",
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        self.rain_collect_any_time_switch.pack(anchor="w", padx=18, pady=(2, 10))
+
+        self.add_rain_time_window_setting()
 
         self.advanced_settings_btn = BanditButton(
             self.left_panel,
@@ -2606,7 +2826,6 @@ try {{
 
     def report_weather_station_result(self, state, detail, notification_key=None):
         timestamp = datetime.now().strftime("%H:%M:%S")
-        previous_state = self.weather_station_last_state
 
         if state is True:
             status = f"Rain active as of {timestamp}"
@@ -2623,18 +2842,6 @@ try {{
         if state != self.weather_station_last_state:
             self.weather_station_last_state = state
             self.log(f"Weather station: {detail}")
-
-            if state is True and previous_state is not True and notification_key is None:
-                self.record_rain_detected("weather station")
-                self.total_weather_notifications += 1
-                self.current_weather_session_notifications += 1
-                self.last_weather_notification_key = f"state:{timestamp}:{detail}"
-                self.save_stats()
-                threading.Thread(
-                    target=play_rain_alert_sound,
-                    args=(self.weather_notification_volume.get(),),
-                    daemon=True,
-                ).start()
 
         if state is True and notification_key is not None and notification_key != self.last_weather_notification_key:
             self.record_rain_detected("weather station")
@@ -2714,15 +2921,13 @@ try {{
                                     parts.append(f"value {rain_value}")
                                 state, detail = True, " | ".join(parts)
                             else:
-                                page = driver.page_source.lower()
                                 visible_text = get_browser_visible_text(driver).lower()
-                                combined_page = f"{visible_text}\n{page}"
+                                rain_notification_key = None
 
-                                if page_has_active_rain_event(combined_page):
-                                    state, detail = True, "Rain appears active on page fallback"
+                                if page_has_active_rain_event(visible_text):
+                                    state, detail = True, "Rain appears active in visible page text"
                                 else:
                                     state, detail = False, "No active rain websocket event"
-                                    rain_notification_key = None
                 except Exception as e:
                     close_reason = f"Chrome closed or became unavailable ({e.__class__.__name__}: {e})"
                     break
@@ -2809,25 +3014,40 @@ try {{
             font=ctk.CTkFont(size=10, weight="bold"),
         ).grid(row=1, column=1, sticky="w", padx=(6, 12), pady=(0, 2))
 
-        ctk.CTkEntry(
+        self.rain_collect_start_entry = ctk.CTkEntry(
             box,
             textvariable=self.rain_collect_start_time,
             height=30,
             fg_color="#070807",
+            disabled_fg_color="#151816",
             border_color="#30251f",
             text_color=COLORS["text"],
+            text_color_disabled=COLORS["muted"],
             placeholder_text="00:00",
-        ).grid(row=2, column=0, sticky="ew", padx=(12, 6), pady=(0, 12))
+        )
+        self.rain_collect_start_entry.grid(row=2, column=0, sticky="ew", padx=(12, 6), pady=(0, 12))
 
-        ctk.CTkEntry(
+        self.rain_collect_end_entry = ctk.CTkEntry(
             box,
             textvariable=self.rain_collect_end_time,
             height=30,
             fg_color="#070807",
+            disabled_fg_color="#151816",
             border_color="#30251f",
             text_color=COLORS["text"],
+            text_color_disabled=COLORS["muted"],
             placeholder_text="23:59",
-        ).grid(row=2, column=1, sticky="ew", padx=(6, 12), pady=(0, 12))
+        )
+        self.rain_collect_end_entry.grid(row=2, column=1, sticky="ew", padx=(6, 12), pady=(0, 12))
+        self.sync_rain_time_window_controls()
+
+    def sync_rain_time_window_controls(self):
+        state = "disabled" if self.rain_collect_any_time.get() else "normal"
+        border_color = "#24201d" if state == "disabled" else "#30251f"
+
+        for entry_name in ("rain_collect_start_entry", "rain_collect_end_entry"):
+            if hasattr(self, entry_name):
+                getattr(self, entry_name).configure(state=state, border_color=border_color)
 
     def add_setting(self, label, variable, min_v, max_v, command=None):
         box = ctk.CTkFrame(self.left_panel, fg_color="#111411", corner_radius=12)
@@ -2941,8 +3161,6 @@ try {{
         ).pack(pady=(0, 22))
 
     def rain_page(self):
-        self.page_title("RAIN BARREL", "WATCHING FOR YOUR TARGET IMAGE")
-
         card = ctk.CTkFrame(
             self.content,
             fg_color="#181412",
@@ -2956,15 +3174,8 @@ try {{
             card,
             text="RAIN AUTOMATION",
             text_color=COLORS["red2"],
-            font=ctk.CTkFont(family="Impact", size=30),
-        ).pack(pady=(24, 6))
-
-        ctk.CTkLabel(
-            card,
-            text="Press START to begin scanning all monitors.",
-            text_color=COLORS["text"],
-            font=ctk.CTkFont(size=14, weight="bold"),
-        ).pack()
+            font=ctk.CTkFont(family="Impact", size=42),
+        ).pack(pady=(26, 12))
 
         self.log_box = ctk.CTkTextbox(
             card,
@@ -2977,7 +3188,9 @@ try {{
         )
         self.log_box.pack(fill="both", expand=True, padx=22, pady=22)
 
-        self.log("Rain page loaded")
+        self.restore_rain_log()
+        if not self.rain_log_entries:
+            self.log("Rain page loaded")
 
     def battles_page(self):
         self.page_title("BATTLES", "SCREEN SCANNER")
@@ -3028,6 +3241,14 @@ try {{
 
     def get_stats_sections(self, stat_page):
         if stat_page == "Rain":
+            last_result = self.get_last_rain_result()
+            total_everyone_claimed = self.get_total_rain_result_claimed()
+            total_tracked_reward = self.get_total_rain_result_your_reward()
+            total_share = (
+                (total_tracked_reward / total_everyone_claimed) * 100
+                if total_everyone_claimed > 0
+                else 0.0
+            )
             return [
                 (
                     "TOTAL RAIN STATS",
@@ -3041,6 +3262,27 @@ try {{
                         ),
                         ("Last Rain Reward", self.format_rain_amount(self.last_rain_reward)),
                         ("Last Rain Detected", self.format_last_rain_detected()),
+                    ],
+                ),
+                (
+                    "RAIN RESULT TRACKING",
+                    [
+                        ("Tracked Rain Results", str(len(self.rain_result_history))),
+                        ("Total Tipped", self.format_rain_amount(self.get_total_rain_result_tipped())),
+                        ("Total People Joined", str(self.get_total_rain_result_people())),
+                        ("Total Everyone Claimed", self.format_rain_amount(total_everyone_claimed)),
+                        ("Your Tracked Share", self.format_percent(total_share)),
+                        (
+                            "Last Everyone Claimed",
+                            self.format_rain_amount(last_result.get("total_scrap_claimed", 0.0))
+                            if last_result
+                            else "--",
+                        ),
+                        (
+                            "Last People Joined",
+                            str(last_result.get("people_joined", 0)) if last_result else "--",
+                        ),
+                        ("Last Comparison", self.format_rain_result_comparison(last_result)),
                     ],
                 ),
                 (
@@ -3167,15 +3409,27 @@ try {{
     # ================= LOGGING =================
 
     def log(self, msg):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.rain_log_entries.append((timestamp, msg))
+        self.rain_log_entries = self.rain_log_entries[-RAIN_LOG_HISTORY_LIMIT:]
+
         if not hasattr(self, "log_box"):
             return
 
-        timestamp = datetime.now().strftime("%H:%M:%S")
         self.after(0, lambda: self._log(timestamp, msg))
 
     def _log(self, timestamp, msg):
         try:
             self.log_box.insert("end", f"[{timestamp}] {msg}\n")
+            self.log_box.see("end")
+        except Exception:
+            pass
+
+    def restore_rain_log(self):
+        try:
+            self.log_box.delete("1.0", "end")
+            for timestamp, msg in self.rain_log_entries:
+                self.log_box.insert("end", f"[{timestamp}] {msg}\n")
             self.log_box.see("end")
         except Exception:
             pass
@@ -3314,6 +3568,7 @@ try {{
         self.running = not self.running
 
         if self.running:
+            self.rain_scan_found_last_check = None
             self.start_rain_session()
             self.save_stats()
             self.refresh_keep_awake_state()
@@ -3333,6 +3588,7 @@ try {{
                 match = locate_image_all_monitors(IMAGE_PATH, self.confidence.get())
 
                 if match:
+                    self.rain_scan_found_last_check = True
                     x, y, score = match
                     self.record_rain_detected("normal tracker")
 
@@ -3379,7 +3635,9 @@ try {{
                     time.sleep(2)
                 else:
                     self.chance_skipped_rain_target = None
-                    self.log("Not found")
+                    if self.rain_scan_found_last_check is not False:
+                        self.log("Not found")
+                    self.rain_scan_found_last_check = False
 
             except Exception as e:
                 self.error_count += 1

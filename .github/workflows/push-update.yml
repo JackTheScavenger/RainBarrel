@@ -2,6 +2,11 @@ name: Build and publish update
 
 on:
   workflow_dispatch:
+    inputs:
+      release_notes:
+        description: "Update notes shown in RainBarrel"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -62,7 +67,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
-          RELEASE_NOTES: ${{ github.event.head_commit.message }}
+          RELEASE_NOTES: ${{ inputs.release_notes || github.event.head_commit.message }}
         shell: pwsh
         run: |
           git config user.name "github-actions[bot]"
@@ -81,7 +86,7 @@ jobs:
 
       - name: Publish latest.json
         env:
-          RELEASE_NOTES: ${{ github.event.head_commit.message }}
+          RELEASE_NOTES: ${{ inputs.release_notes || github.event.head_commit.message }}
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.version }}"
