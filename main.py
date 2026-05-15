@@ -41,7 +41,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.1.5"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -221,12 +221,25 @@ def get_browser_visible_text(driver):
 
 
 def parse_rain_reward_amount(text):
-    match = re.search(
-        r"\byou\s+won\s+([0-9]+(?:[.,][0-9]+)?)\s+scrap\b",
-        text,
-        re.IGNORECASE,
-    )
+    patterns = [
+        r"\byou\s+won\s+([0-9]+(?:[.,][0-9]+)?)(?:\s+scrap)?\b",
+        r"\bwon\s+([0-9]+(?:[.,][0-9]+)?)\s+scrap\b",
+        r"\byour\s+reward\s+([0-9]+(?:[.,][0-9]+)?)\s+scrap\b",
+    ]
+    match = None
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            break
+
     if not match:
+        if re.search(r"\byou\s+won\b", text, re.IGNORECASE):
+            numbers = re.findall(r"([0-9]+(?:[.,][0-9]+)?)", text)
+            if numbers:
+                try:
+                    return float(numbers[0].replace(",", "."))
+                except ValueError:
+                    return None
         return None
 
     try:
@@ -970,6 +983,7 @@ class App(ctk.CTk):
             self.rain_result_history = []
         self.rain_result_history = self.clean_rain_result_history(self.rain_result_history)
         self.rain_reward_tracker_active = False
+        self.rain_reward_tracker_run_id = 0
         self.rain_reward_lock = threading.Lock()
         self.current_session_seconds = 0.0
         self.current_session_rains_clicked = 0
@@ -2221,13 +2235,14 @@ try {{
 
     def start_rain_reward_tracker(self):
         with self.rain_reward_lock:
-            if self.rain_reward_tracker_active:
-                return
+            self.rain_reward_tracker_run_id += 1
+            run_id = self.rain_reward_tracker_run_id
             self.rain_reward_tracker_active = True
 
-        threading.Thread(target=self.rain_reward_tracker_worker, daemon=True).start()
+        self.log("Rain reward tracker started")
+        threading.Thread(target=self.rain_reward_tracker_worker, args=(run_id,), daemon=True).start()
 
-    def rain_reward_tracker_worker(self):
+    def rain_reward_tracker_worker(self, run_id):
         deadline = time.time() + RAIN_REWARD_WATCH_SECONDS
         last_detail = None
         own_reward = None
@@ -2235,7 +2250,7 @@ try {{
         tracked_result = False
 
         try:
-            while time.time() < deadline:
+            while time.time() < deadline and run_id == self.rain_reward_tracker_run_id:
                 amount, result, detail = read_rain_screen_details()
                 if amount is not None and own_reward is None:
                     own_reward = round(float(amount), 2)
@@ -2257,11 +2272,12 @@ try {{
                 last_detail = detail
                 time.sleep(RAIN_REWARD_SCAN_INTERVAL_SECONDS)
 
-            if last_detail and not tracked_result:
+            if run_id == self.rain_reward_tracker_run_id and last_detail and not tracked_result:
                 self.log(f"Rain reward tracker stopped: {last_detail}")
         finally:
             with self.rain_reward_lock:
-                self.rain_reward_tracker_active = False
+                if run_id == self.rain_reward_tracker_run_id:
+                    self.rain_reward_tracker_active = False
 
     def record_rain_reward(self, amount):
         amount = round(float(amount), 2)
@@ -3750,7 +3766,7 @@ try {{
                     self.last_action = "Clicked target"
                     self.after(0, self.save_stats)
                     self.log("Clicked target")
-                    self.after(0, self.start_rain_reward_tracker)
+                    self.start_rain_reward_tracker()
 
                     move_away_x, move_away_y = get_random_point_all_monitors(
                         avoid_x=x,
