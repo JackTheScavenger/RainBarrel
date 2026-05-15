@@ -1,6 +1,6 @@
 {
-  "version": "1.1.2",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.2/RainBarrel.exe",
-  "sha256": "0c7e3ce27cd9db059dfe16d1dfefdbe8329f0eff2e1c99776c911b88a9671c35",
-  "notes": "Updated Rain UI, weather station function, and added more rain stat tracking to prep for rain amount prediction"
+  "version": "1.1.3",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.3/RainBarrel.exe",
+  "sha256": "23edde3c2cd14a2f8b6bf3bdfe03d117d48c5013a6337b64137b299b4f15d3a6",
+  "notes": "Fixed Rain settings startup crash caused by disabled time input styling."
 }
