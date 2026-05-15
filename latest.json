@@ -1,7 +1,6 @@
 {
-  "version": "1.1.4",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.4/RainBarrel.exe",
-  "sha256": "2a3aefd7f50f5f001c9c6b0b479ba540e4aaa311e930ad9ebb7c933b3bdc7e5b",
-  "notes": "Added Bandit.camp open button and startup toggle, updated rain result logging, and made hourly rain stats less skewed.",
-  "published_at": "2026-05-15T22:08:06Z"
+  "version": "1.1.5",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.5/RainBarrel.exe",
+  "sha256": "50441c30972bb5191e17644c2a3fc950d5e0394cb36e3f092d8042e6dd2d8440",
+  "notes": "Fixed rain reward tracking after clicks so each rain click starts a fresh reward tracker and reads more OCR reward formats."
 }
