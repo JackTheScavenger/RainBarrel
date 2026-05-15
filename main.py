@@ -41,7 +41,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.5"
+APP_VERSION = "1.1.6"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -1711,11 +1711,11 @@ try {{
 
     def rain_collection_allowed(self, x, y):
         if not self.rain_collection_time_allowed():
-            return False, "Skipped target outside rain collection time"
+            return False, "Skipped rain target image outside rain collection time"
 
         if not self.rain_collection_chance_allowed(x, y):
             chance = min(max(float(self.rain_collect_chance.get()), 0.0), 100.0)
-            return False, f"Skipped target by rain collection chance ({chance:.0f}%)"
+            return False, f"Skipped rain target image by collection chance ({chance:.0f}%)"
 
         return True, ""
 
@@ -3739,7 +3739,7 @@ try {{
                     x, y, score = match
                     self.record_rain_detected("normal tracker")
 
-                    self.log(f"Found target | X={x} Y={y} confidence={score:.3f}")
+                    self.log(f"Found rain target image | X={x} Y={y} confidence={score:.3f}")
 
                     allowed, skip_reason = self.rain_collection_allowed(x, y)
                     if not allowed:
@@ -3763,9 +3763,9 @@ try {{
                     self.chance_skipped_rain_target = None
                     self.total_rains_clicked += 1
                     self.current_session_rains_clicked += 1
-                    self.last_action = "Clicked target"
+                    self.last_action = "Clicked rain join button"
                     self.after(0, self.save_stats)
-                    self.log("Clicked target")
+                    self.log("Clicked rain join button")
                     self.start_rain_reward_tracker()
 
                     move_away_x, move_away_y = get_random_point_all_monitors(
@@ -3783,7 +3783,7 @@ try {{
                 else:
                     self.chance_skipped_rain_target = None
                     if self.rain_scan_found_last_check is not False:
-                        self.log("Not found")
+                        self.log("Rain target image not found")
                     self.rain_scan_found_last_check = False
 
             except Exception as e:
