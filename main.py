@@ -42,7 +42,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.12"
+APP_VERSION = "1.1.13"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIDENCE_PERCENT = 65
@@ -100,9 +100,10 @@ UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/JackTheScavenger/RainBa
 UPDATE_CHECK_TIMEOUT_SECONDS = 8
 UPDATE_DOWNLOAD_TIMEOUT_SECONDS = 5 * 60
 SELENIUM_PAGE_WAIT = 45
-RAIN_REWARD_WATCH_SECONDS = 3 * 60
-RAIN_RESULT_WATCH_SECONDS = 3 * 60
-RAIN_TIP_WATCH_SECONDS = 3 * 60
+RAIN_TRACKER_WATCH_SECONDS = 3 * 60 + 10
+RAIN_REWARD_WATCH_SECONDS = RAIN_TRACKER_WATCH_SECONDS
+RAIN_RESULT_WATCH_SECONDS = RAIN_TRACKER_WATCH_SECONDS
+RAIN_TIP_WATCH_SECONDS = RAIN_TRACKER_WATCH_SECONDS
 RAIN_FOUND_COOLDOWN_SECONDS = 3 * 60
 WEATHER_RAIN_FOUND_COOLDOWN_SECONDS = 3 * 60
 RAIN_REWARD_SCAN_INTERVAL_SECONDS = 1
@@ -1573,6 +1574,8 @@ class App(ctk.CTk):
         self.pending_rain_tracking_reward = None
         self.pending_rain_tracking_result = None
         self.pending_rain_tracking_recorded = False
+        self.rain_tracking_source = None
+        self.rain_tracking_started_at = None
         self.current_session_seconds = 0.0
         self.current_session_rains_clicked = 0
         self.current_session_rain_collected = 0.0
@@ -3147,7 +3150,19 @@ try {{
         self.last_action = f"Rain detected by {source}"
         self.save_stats()
 
-    def start_rain_trackers(self):
+    def start_rain_trackers(self, source="rain tracker"):
+        with self.rain_reward_lock:
+            already_running = (
+                self.rain_tip_tracker_active
+                or self.rain_reward_tracker_active
+                or self.rain_result_tracker_active
+            )
+            existing_source = self.rain_tracking_source or "another source"
+
+        if already_running:
+            self.log(f"Rain trackers already running from {existing_source}; {source} trigger ignored")
+            return False
+
         with self.rain_tracking_lock:
             self.pending_rain_tracking_reward = None
             self.pending_rain_tracking_result = None
@@ -3155,6 +3170,8 @@ try {{
             self.pending_rain_total_tipped = None
             self.pending_rain_total_tipped_at = None
             self.pending_rain_total_tipped_verified = False
+            self.rain_tracking_source = source
+            self.rain_tracking_started_at = time.time()
 
         with self.rain_reward_lock:
             self.rain_tip_tracker_run_id += 1
@@ -3171,6 +3188,7 @@ try {{
             self.rain_reward_timer_status = ""
             self.rain_result_timer_status = ""
 
+        self.log(f"Rain trackers started by {source}")
         self.log("Rain tip tracker started")
         self.log("Rain reward tracker started")
         self.log("Rain result tracker started")
@@ -3189,6 +3207,7 @@ try {{
             args=(result_run_id,),
             daemon=True,
         ).start()
+        return True
 
     def maybe_record_pending_rain_result(self):
         with self.rain_tracking_lock:
@@ -4173,6 +4192,7 @@ try {{
 
         if state is True and notification_key is not None and notification_key != self.last_weather_notification_key:
             self.record_rain_detected("weather station")
+            self.start_rain_trackers("weather station")
             self.total_weather_notifications += 1
             self.current_weather_session_notifications += 1
             self.last_weather_notification_key = notification_key
@@ -5136,7 +5156,7 @@ try {{
                     self.last_action = "Clicked rain join button"
                     self.after(0, self.save_stats)
                     self.log("Clicked rain join button")
-                    self.start_rain_trackers()
+                    self.start_rain_trackers("rain clicker")
 
                     move_away_x, move_away_y = get_random_point_all_monitors(
                         avoid_x=x,
