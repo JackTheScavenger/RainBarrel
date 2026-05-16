@@ -1,6 +1,6 @@
 {
-  "version": "1.1.9",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.9/RainBarrel.exe",
-  "sha256": "e879433145c5fcac513a09c76a94f0da7e095c8235f55f8566e560f5c601d1bb",
-  "notes": "Bundled Windows OCR modules and improved reward popup image matching for packaged builds."
+  "version": "1.1.10",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.10/RainBarrel.exe",
+  "sha256": "7311e11aeea66986c21661bdef4e415211788a0845e31e74e426a338333cf061",
+  "notes": "Improved reward popup matching, added yellow-box rain result detection, and paused rain/weather checks for 3 minutes after a rain is found."
 }
