@@ -1,6 +1,6 @@
 {
-  "version": "1.1.7",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.7/RainBarrel.exe",
-  "sha256": "39c7e3d0aad71f16f9b56fc46e9f70e8224afbe9be8812e2e562b936644b3fed",
-  "notes": "Updated the app icon, faster scrolling, weather station tab handling, and rain reward/weather timing fixes."
+  "version": "1.1.8",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.8/RainBarrel.exe",
+  "sha256": "413f95cf50a576b6e35903ccdeedddd04341e8e6e8ef7c4052d5c869d969c384",
+  "notes": "Split reward and result tracking into separate 3-minute watchers and made Weather Station ignore stale websocket rain timers."
 }
