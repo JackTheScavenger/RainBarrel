@@ -1,6 +1,6 @@
 {
-  "version": "1.1.11",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.11/RainBarrel.exe",
-  "sha256": "a5d7e52a8b9dad8d2f7110de443079ded51370401899aaccace523df8f698820",
-  "notes": "Added live rain tip tracking from the joined rain box and improved rain result parsing for more chat result formats."
+  "version": "1.1.12",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.12/RainBarrel.exe",
+  "sha256": "07491490f58634e17e5f782d5d5e48be86b8508f4c78b2e49efefe0f0e80aff5",
+  "notes": "Improved rain tip accuracy with session read counts, tie rejection, history-based correction, and unverified tip marking."
 }
