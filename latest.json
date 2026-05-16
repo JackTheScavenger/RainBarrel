@@ -1,6 +1,6 @@
 {
-  "version": "1.1.13",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.13/RainBarrel.exe",
-  "sha256": "adfe7b87cd797b29294baa0f2f7f7e94c05b5bba3da7181f5049437febf00b06",
-  "notes": "Weather Station rain alerts now start reward, result, and tip tracking for 3 minutes 10 seconds, while duplicate rain tracker triggers are ignored."
+  "version": "1.1.14",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.14/RainBarrel.exe",
+  "sha256": "d063397c375e06fec55ea283f4a88fd3d7504b6f66deb2934964804346ca2063",
+  "notes": "Added tracker diagnostics, serialized OCR, extended duplicate tracker triggers, and reduced result OCR load for Weather Station/manual rain tracking."
 }
