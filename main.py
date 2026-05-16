@@ -42,7 +42,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.7"
+APP_VERSION = "1.1.8"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIDENCE_PERCENT = 65
@@ -99,15 +99,16 @@ UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/JackTheScavenger/RainBa
 UPDATE_CHECK_TIMEOUT_SECONDS = 8
 UPDATE_DOWNLOAD_TIMEOUT_SECONDS = 5 * 60
 SELENIUM_PAGE_WAIT = 45
-RAIN_REWARD_WATCH_SECONDS = 45 * 60
+RAIN_REWARD_WATCH_SECONDS = 3 * 60
+RAIN_RESULT_WATCH_SECONDS = 3 * 60
 RAIN_REWARD_SCAN_INTERVAL_SECONDS = 1
+RAIN_RESULT_SCAN_INTERVAL_SECONDS = 1
 RAIN_REWARD_POPUP_CONFIDENCE = 0.7
 RAIN_REWARD_POPUP_CROP_WIDTH = 520
 RAIN_REWARD_POPUP_CROP_HEIGHT = 180
 OCR_PREVIEW_LIMIT = 140
 RAIN_REWARD_HISTORY_LIMIT = 100
 RAIN_LOG_HISTORY_LIMIT = 500
-RAIN_RESULT_MIN_WAIT_AFTER_REWARD_SECONDS = 10
 BATTLE_SCAN_INTERVAL_SECONDS = 2.5
 BATTLE_CLICK_OFFSET_X = 260
 BATTLE_CLICK_OFFSET_Y = 0
@@ -493,65 +494,51 @@ async def ocr_image_with_windows(image):
 
 
 def read_rain_reward_amount_from_screen():
-    amount, _, detail = read_rain_screen_details()
-    if amount is None:
-        return None, detail
-
-    return amount, f"Read reward popup: {amount:.2f} scrap"
-
-
-def read_rain_screen_details():
     try:
         screenshot = capture_all_monitors_image()
     except (ImportError, ModuleNotFoundError):
-        return None, None, "Windows OCR packages are not installed"
+        return None, "Windows OCR packages are not installed"
     except Exception as e:
-        return None, None, f"Screenshot failed: {e.__class__.__name__}"
+        return None, f"Screenshot failed: {e.__class__.__name__}"
 
-    popup_error = None
-    popup_score = None
-    popup_text = ""
-    try:
-        reward_crop, popup_score = crop_rain_reward_popup(screenshot)
-        if reward_crop is not None:
-            popup_text = asyncio.run(ocr_image_with_windows(reward_crop))
-            reward = parse_rain_reward_amount(popup_text)
-            result = parse_rain_result_summary(popup_text)
-            if reward is not None or result is not None:
-                return reward, result, f"Read rain reward popup image ({popup_score:.2f})"
-    except (ImportError, ModuleNotFoundError):
-        return None, None, "Windows OCR packages are not installed"
-    except Exception as e:
-        if popup_score is not None:
-            popup_error = f"Reward popup image found but crop OCR failed: {e.__class__.__name__}"
+    reward_crop, popup_score = crop_rain_reward_popup(screenshot)
+    if reward_crop is None:
+        return None, "Reward popup image not found"
 
     try:
-        text = asyncio.run(ocr_image_with_windows(screenshot))
+        text = asyncio.run(ocr_image_with_windows(reward_crop))
     except (ImportError, ModuleNotFoundError):
-        return None, None, "Windows OCR packages are not installed"
+        return None, "Windows OCR packages are not installed"
     except Exception as e:
-        return None, None, f"OCR failed: {e.__class__.__name__}"
+        return None, f"Reward popup OCR failed: {e.__class__.__name__}"
 
     reward = parse_rain_reward_amount(text)
-    result = parse_rain_result_summary(text)
-    if reward is not None or result is not None:
-        return reward, result, "Read rain screen details"
-
-    if popup_score is not None:
-        if popup_error:
-            return None, None, popup_error
-
+    if reward is None:
         return (
             None,
-            None,
             "Reward popup image found but amount was not parsed "
-            f"(match={popup_score:.2f}, OCR saw: {compact_ocr_preview(popup_text)})",
+            f"(match={popup_score:.2f}, OCR saw: {compact_ocr_preview(text)})",
         )
+
+    return reward, f"Read reward popup: {reward:.2f} scrap"
+
+
+def read_rain_result_from_screen():
+    try:
+        screenshot = capture_all_monitors_image()
+        text = asyncio.run(ocr_image_with_windows(screenshot))
+    except (ImportError, ModuleNotFoundError):
+        return None, "Windows OCR packages are not installed"
+    except Exception as e:
+        return None, f"Rain result OCR failed: {e.__class__.__name__}"
+
+    result = parse_rain_result_summary(text)
+    if result is not None:
+        return result, "Read rain result summary"
 
     return (
         None,
-        None,
-        "Reward popup image not found and rain reward/result text not visible "
+        "Rain result summary not visible "
         f"(OCR saw: {compact_ocr_preview(text)})",
     )
 
@@ -1255,7 +1242,13 @@ class App(ctk.CTk):
         self.rain_result_history = self.clean_rain_result_history(self.rain_result_history)
         self.rain_reward_tracker_active = False
         self.rain_reward_tracker_run_id = 0
+        self.rain_result_tracker_active = False
+        self.rain_result_tracker_run_id = 0
         self.rain_reward_lock = threading.Lock()
+        self.rain_tracking_lock = threading.Lock()
+        self.pending_rain_tracking_reward = None
+        self.pending_rain_tracking_result = None
+        self.pending_rain_tracking_recorded = False
         self.current_session_seconds = 0.0
         self.current_session_rains_clicked = 0
         self.current_session_rain_collected = 0.0
@@ -2386,9 +2379,9 @@ try {{
             ),
             "result_checker": self.format_countdown(
                 self.rain_result_next_check_at,
-                self.rain_reward_tracker_active,
+                self.rain_result_tracker_active,
                 self.rain_result_timer_status
-                if self.rain_reward_tracker_active and self.rain_result_timer_status != "Off"
+                if self.rain_result_tracker_active and self.rain_result_timer_status != "Off"
                 else None,
             ),
         }
@@ -2825,45 +2818,64 @@ try {{
         self.last_action = f"Rain detected by {source}"
         self.save_stats()
 
-    def start_rain_reward_tracker(self):
+    def start_rain_trackers(self):
+        with self.rain_tracking_lock:
+            self.pending_rain_tracking_reward = None
+            self.pending_rain_tracking_result = None
+            self.pending_rain_tracking_recorded = False
+
         with self.rain_reward_lock:
             self.rain_reward_tracker_run_id += 1
-            run_id = self.rain_reward_tracker_run_id
+            reward_run_id = self.rain_reward_tracker_run_id
+            self.rain_result_tracker_run_id += 1
+            result_run_id = self.rain_result_tracker_run_id
             self.rain_reward_tracker_active = True
+            self.rain_result_tracker_active = True
             self.rain_reward_next_check_at = time.time()
-            self.rain_result_next_check_at = None
+            self.rain_result_next_check_at = time.time()
             self.rain_reward_timer_status = ""
-            self.rain_result_timer_status = "Waiting for reward"
+            self.rain_result_timer_status = ""
 
         self.log("Rain reward tracker started")
-        threading.Thread(target=self.rain_reward_tracker_worker, args=(run_id,), daemon=True).start()
+        self.log("Rain result tracker started")
+        threading.Thread(
+            target=self.rain_reward_tracker_worker,
+            args=(reward_run_id,),
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=self.rain_result_tracker_worker,
+            args=(result_run_id,),
+            daemon=True,
+        ).start()
+
+    def maybe_record_pending_rain_result(self):
+        with self.rain_tracking_lock:
+            if self.pending_rain_tracking_recorded:
+                return
+            if self.pending_rain_tracking_reward is None or self.pending_rain_tracking_result is None:
+                return
+
+            reward = self.pending_rain_tracking_reward
+            summary = self.pending_rain_tracking_result
+            self.pending_rain_tracking_recorded = True
+
+        self.after(
+            0,
+            lambda summary=summary, reward=reward: self.record_rain_result(summary, reward),
+        )
 
     def rain_reward_tracker_worker(self, run_id):
         deadline = time.time() + RAIN_REWARD_WATCH_SECONDS
         last_detail = None
-        own_reward = None
-        reward_found_at = None
-        tracked_result = False
         reward_parse_warning_logged = False
 
         try:
             while time.time() < deadline and run_id == self.rain_reward_tracker_run_id:
-                now = time.time()
-                if own_reward is None:
-                    self.rain_reward_next_check_at = now
-                    self.rain_reward_timer_status = ""
-                    self.rain_result_next_check_at = None
-                    self.rain_result_timer_status = "Waiting for reward"
-                else:
-                    self.rain_reward_next_check_at = None
-                    self.rain_reward_timer_status = "Reward found"
-                    self.rain_result_timer_status = ""
-                    self.rain_result_next_check_at = max(
-                        now,
-                        reward_found_at + RAIN_RESULT_MIN_WAIT_AFTER_REWARD_SECONDS,
-                    )
+                self.rain_reward_next_check_at = time.time()
+                self.rain_reward_timer_status = ""
 
-                amount, result, detail = read_rain_screen_details()
+                amount, detail = read_rain_reward_amount_from_screen()
                 if (
                     amount is None
                     and not reward_parse_warning_logged
@@ -2872,59 +2884,59 @@ try {{
                     reward_parse_warning_logged = True
                     self.log(detail)
 
-                if amount is not None and own_reward is None:
+                if amount is not None:
                     own_reward = round(float(amount), 2)
-                    reward_found_at = time.time()
                     self.rain_reward_next_check_at = None
                     self.rain_reward_timer_status = "Reward found"
-                    self.rain_result_timer_status = ""
-                    self.rain_result_next_check_at = (
-                        reward_found_at + RAIN_RESULT_MIN_WAIT_AFTER_REWARD_SECONDS
-                    )
+                    with self.rain_tracking_lock:
+                        self.pending_rain_tracking_reward = own_reward
                     self.after(0, lambda value=own_reward: self.record_rain_reward(value))
-
-                result_wait_finished = (
-                    reward_found_at is not None
-                    and time.time() - reward_found_at >= RAIN_RESULT_MIN_WAIT_AFTER_REWARD_SECONDS
-                )
-                if result is not None and own_reward is not None and result_wait_finished:
-                    self.after(
-                        0,
-                        lambda summary=result, reward=own_reward: self.record_rain_result(summary, reward),
-                    )
-                    tracked_result = True
+                    self.maybe_record_pending_rain_result()
                     return
 
-                if own_reward is None:
-                    self.rain_reward_next_check_at = time.time() + RAIN_REWARD_SCAN_INTERVAL_SECONDS
-                    self.rain_reward_timer_status = ""
-                    self.rain_result_next_check_at = None
-                    self.rain_result_timer_status = "Waiting for reward"
-                elif result_wait_finished:
-                    self.rain_reward_next_check_at = None
-                    self.rain_reward_timer_status = "Reward found"
-                    self.rain_result_timer_status = ""
-                    self.rain_result_next_check_at = time.time() + RAIN_REWARD_SCAN_INTERVAL_SECONDS
-                else:
-                    self.rain_reward_next_check_at = None
-                    self.rain_reward_timer_status = "Reward found"
-                    self.rain_result_timer_status = ""
-                    self.rain_result_next_check_at = (
-                        reward_found_at + RAIN_RESULT_MIN_WAIT_AFTER_REWARD_SECONDS
-                    )
-
                 last_detail = detail
+                self.rain_reward_next_check_at = time.time() + RAIN_REWARD_SCAN_INTERVAL_SECONDS
                 time.sleep(RAIN_REWARD_SCAN_INTERVAL_SECONDS)
 
-            if run_id == self.rain_reward_tracker_run_id and last_detail and not tracked_result:
+            if run_id == self.rain_reward_tracker_run_id and last_detail:
                 self.log(f"Rain reward tracker stopped: {last_detail}")
         finally:
             with self.rain_reward_lock:
                 if run_id == self.rain_reward_tracker_run_id:
                     self.rain_reward_tracker_active = False
                     self.rain_reward_next_check_at = None
-                    self.rain_result_next_check_at = None
                     self.rain_reward_timer_status = "Off"
+
+    def rain_result_tracker_worker(self, run_id):
+        deadline = time.time() + RAIN_RESULT_WATCH_SECONDS
+        last_detail = None
+
+        try:
+            while time.time() < deadline and run_id == self.rain_result_tracker_run_id:
+                self.rain_result_next_check_at = time.time()
+                self.rain_result_timer_status = ""
+
+                result, detail = read_rain_result_from_screen()
+                if result is not None:
+                    with self.rain_tracking_lock:
+                        self.pending_rain_tracking_result = result
+                    self.rain_result_next_check_at = None
+                    self.rain_result_timer_status = "Result found"
+                    self.log("Rain result summary found")
+                    self.maybe_record_pending_rain_result()
+                    return
+
+                last_detail = detail
+                self.rain_result_next_check_at = time.time() + RAIN_RESULT_SCAN_INTERVAL_SECONDS
+                time.sleep(RAIN_RESULT_SCAN_INTERVAL_SECONDS)
+
+            if run_id == self.rain_result_tracker_run_id and last_detail:
+                self.log(f"Rain result tracker stopped: {last_detail}")
+        finally:
+            with self.rain_reward_lock:
+                if run_id == self.rain_result_tracker_run_id:
+                    self.rain_result_tracker_active = False
+                    self.rain_result_next_check_at = None
                     self.rain_result_timer_status = "Off"
 
     def record_rain_reward(self, amount):
@@ -3018,6 +3030,10 @@ try {{
         self.weather_station_driver = None
         self.weather_station_active = False
         self.weather_station_run_id += 1
+        self.rain_reward_tracker_active = False
+        self.rain_result_tracker_active = False
+        self.rain_reward_tracker_run_id += 1
+        self.rain_result_tracker_run_id += 1
         self.rain_collector_next_check_at = None
         self.weather_station_next_check_at = None
         self.rain_reward_next_check_at = None
@@ -3794,22 +3810,27 @@ try {{
                                 elif event_type == "user_count":
                                     rain_user_count = payload
 
-                            if rain_active_until_ms > now_ms:
+                            visible_text = get_browser_visible_text(driver).lower()
+                            page_rain_active = page_has_active_rain_event(visible_text)
+
+                            if page_rain_active:
                                 ends_in = max(0, int((rain_active_until_ms - now_ms) / 1000))
-                                parts = [f"Rain websocket active, ends in {ends_in}s"]
+                                parts = ["Rain active in page text"]
+                                if rain_active_until_ms > now_ms:
+                                    parts.append(f"websocket ends in {ends_in}s")
                                 if rain_user_count is not None:
                                     parts.append(f"{rain_user_count} users")
                                 if rain_value is not None:
                                     parts.append(f"value {rain_value}")
                                 state, detail = True, " | ".join(parts)
                             else:
-                                visible_text = get_browser_visible_text(driver).lower()
-                                rain_notification_key = None
-
-                                if page_has_active_rain_event(visible_text):
-                                    state, detail = True, "Rain appears active in visible page text"
+                                if rain_active_until_ms > now_ms:
+                                    detail = "No active rain controls found; ignored stale websocket timer"
                                 else:
-                                    state, detail = False, "No active rain websocket event"
+                                    detail = "No active rain controls found"
+                                rain_active_until_ms = 0
+                                rain_notification_key = None
+                                state = False
                 except Exception as e:
                     shutdown_status, shutdown_log = self.get_weather_station_shutdown_messages(e)
                     break
@@ -4642,7 +4663,7 @@ try {{
                     self.last_action = "Clicked rain join button"
                     self.after(0, self.save_stats)
                     self.log("Clicked rain join button")
-                    self.start_rain_reward_tracker()
+                    self.start_rain_trackers()
 
                     move_away_x, move_away_y = get_random_point_all_monitors(
                         avoid_x=x,
