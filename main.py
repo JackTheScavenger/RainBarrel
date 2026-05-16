@@ -19,6 +19,7 @@ import webbrowser
 import winsound
 import wave
 from datetime import datetime
+from tkinter import TclError, filedialog
 
 import cv2
 import mss
@@ -41,9 +42,19 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.6"
+APP_VERSION = "1.1.7"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_CONFIDENCE_PERCENT = 65
+DEFAULT_RAIN_CLICKER_INTERVAL = 25
+DEFAULT_MOVE_TIME = 1.5
+DEFAULT_MOVE_STEPS = 100
+DEFAULT_RAIN_COLLECT_ANY_TIME = True
+DEFAULT_RAIN_COLLECT_START_TIME = "00:00"
+DEFAULT_RAIN_COLLECT_END_TIME = "23:59"
+DEFAULT_RAIN_COLLECT_CHANCE = 100
+DEFAULT_WEATHER_STATION_INTERVAL = 15
+DEFAULT_WEATHER_NOTIFICATION_VOLUME = 100
 
 
 def resource_path(filename):
@@ -78,23 +89,30 @@ def app_data_path(filename):
 
 IMAGE_PATH = resource_path("Join Rain Event.png")
 BATTLE_DISCOUNT_IMAGE_PATH = resource_path("100 % off .png")
+RAIN_REWARD_IMAGE_PATH = resource_path("Rain amount.png")
 ICON_PATH = resource_path("app_icon.ico")
 DEFAULT_DATA_PATH = resource_path("bandit_data.json")
 DATA_PATH = app_data_path("bandit_data.json")
 ALERT_SOUND_PATH = resource_path("rain_alert.wav")
 BANDIT_CAMP_URL = "https://bandit.camp/"
-UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/RainBarrel/main/latest.json"
+UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/JackTheScavenger/RainBarrel/main/latest.json"
 UPDATE_CHECK_TIMEOUT_SECONDS = 8
 UPDATE_DOWNLOAD_TIMEOUT_SECONDS = 5 * 60
 SELENIUM_PAGE_WAIT = 45
 RAIN_REWARD_WATCH_SECONDS = 45 * 60
-RAIN_REWARD_SCAN_INTERVAL_SECONDS = 3
+RAIN_REWARD_SCAN_INTERVAL_SECONDS = 1
+RAIN_REWARD_POPUP_CONFIDENCE = 0.7
+RAIN_REWARD_POPUP_CROP_WIDTH = 520
+RAIN_REWARD_POPUP_CROP_HEIGHT = 180
+OCR_PREVIEW_LIMIT = 140
 RAIN_REWARD_HISTORY_LIMIT = 100
 RAIN_LOG_HISTORY_LIMIT = 500
 RAIN_RESULT_MIN_WAIT_AFTER_REWARD_SECONDS = 10
 BATTLE_SCAN_INTERVAL_SECONDS = 2.5
 BATTLE_CLICK_OFFSET_X = 260
 BATTLE_CLICK_OFFSET_Y = 0
+WEATHER_RAIN_MAX_ACTIVE_SECONDS = 10 * 60
+SCROLL_WHEEL_SPEED_MULTIPLIER = 3
 
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0
@@ -206,6 +224,55 @@ def page_has_active_rain_event(page):
     ]
 
     return any(marker in page for marker in active_markers)
+
+
+def parse_epoch_millis(value):
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    if timestamp <= 0:
+        return None
+
+    if timestamp >= 1_000_000_000_000:
+        return int(timestamp)
+
+    if timestamp >= 1_000_000_000:
+        return int(timestamp * 1000)
+
+    return None
+
+
+def parse_weather_rain_active_until_ms(payload, now_ms):
+    started_at = parse_epoch_millis(payload.get("startedAt")) or now_ms
+
+    for key in ("endsAt", "endAt", "expiresAt", "expireAt", "finishedAt"):
+        end_at = parse_epoch_millis(payload.get(key))
+        if end_at is not None:
+            max_end = started_at + WEATHER_RAIN_MAX_ACTIVE_SECONDS * 1000
+            return min(end_at, max_end)
+
+    try:
+        duration = float(payload.get("duration", 0))
+    except (TypeError, ValueError):
+        duration = 0
+
+    if duration <= 0:
+        return now_ms
+
+    if duration >= 1_000_000_000:
+        end_at = parse_epoch_millis(duration)
+    elif duration <= WEATHER_RAIN_MAX_ACTIVE_SECONDS:
+        end_at = started_at + int(duration * 1000)
+    else:
+        end_at = started_at + int(duration)
+
+    if end_at is None:
+        return now_ms
+
+    max_end = started_at + WEATHER_RAIN_MAX_ACTIVE_SECONDS * 1000
+    return min(end_at, max_end)
 
 
 def page_is_bandit_loading(page_text):
@@ -334,6 +401,67 @@ def capture_all_monitors_image():
     return Image.fromarray(screen)
 
 
+def compact_ocr_preview(text, limit=OCR_PREVIEW_LIMIT):
+    preview = re.sub(r"\s+", " ", text or "").strip()
+    if not preview:
+        return "no readable text"
+
+    if len(preview) > limit:
+        return preview[:limit].rstrip() + "..."
+
+    return preview
+
+
+def locate_image_in_pil(image, image_path, confidence=0.7):
+    if not os.path.exists(image_path):
+        return None
+
+    target = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    if target is None:
+        return None
+
+    screen_rgb = np.array(image.convert("RGB"))
+    screen_bgr = cv2.cvtColor(screen_rgb, cv2.COLOR_RGB2BGR)
+    target_h, target_w = target.shape[:2]
+    screen_h, screen_w = screen_bgr.shape[:2]
+    if target_w > screen_w or target_h > screen_h:
+        return None
+
+    result = cv2.matchTemplate(screen_bgr, target, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, max_loc = cv2.minMaxLoc(result)
+    if max_val < confidence:
+        return None
+
+    return {
+        "left": int(max_loc[0]),
+        "top": int(max_loc[1]),
+        "width": int(target_w),
+        "height": int(target_h),
+        "score": float(max_val),
+    }
+
+
+def crop_rain_reward_popup(screenshot):
+    match = locate_image_in_pil(
+        screenshot,
+        RAIN_REWARD_IMAGE_PATH,
+        confidence=RAIN_REWARD_POPUP_CONFIDENCE,
+    )
+    if not match:
+        return None, None
+
+    left = max(0, match["left"] - 12)
+    top = max(0, match["top"] - 12)
+    right = min(screenshot.width, left + RAIN_REWARD_POPUP_CROP_WIDTH)
+    bottom = min(screenshot.height, top + RAIN_REWARD_POPUP_CROP_HEIGHT)
+    crop = screenshot.crop((left, top, right, bottom))
+
+    if crop.width < 900:
+        crop = crop.resize((crop.width * 2, crop.height * 2), Image.LANCZOS)
+
+    return crop, match["score"]
+
+
 async def ocr_image_with_windows(image):
     imaging = importlib.import_module("winrt.windows.graphics.imaging")
     ocr = importlib.import_module("winrt.windows.media.ocr")
@@ -365,17 +493,9 @@ async def ocr_image_with_windows(image):
 
 
 def read_rain_reward_amount_from_screen():
-    try:
-        screenshot = capture_all_monitors_image()
-        text = asyncio.run(ocr_image_with_windows(screenshot))
-    except (ImportError, ModuleNotFoundError):
-        return None, "Windows OCR packages are not installed"
-    except Exception as e:
-        return None, f"OCR failed: {e.__class__.__name__}"
-
-    amount = parse_rain_reward_amount(text)
+    amount, _, detail = read_rain_screen_details()
     if amount is None:
-        return None, "Rain reward popup not visible yet"
+        return None, detail
 
     return amount, f"Read reward popup: {amount:.2f} scrap"
 
@@ -383,6 +503,29 @@ def read_rain_reward_amount_from_screen():
 def read_rain_screen_details():
     try:
         screenshot = capture_all_monitors_image()
+    except (ImportError, ModuleNotFoundError):
+        return None, None, "Windows OCR packages are not installed"
+    except Exception as e:
+        return None, None, f"Screenshot failed: {e.__class__.__name__}"
+
+    popup_error = None
+    popup_score = None
+    popup_text = ""
+    try:
+        reward_crop, popup_score = crop_rain_reward_popup(screenshot)
+        if reward_crop is not None:
+            popup_text = asyncio.run(ocr_image_with_windows(reward_crop))
+            reward = parse_rain_reward_amount(popup_text)
+            result = parse_rain_result_summary(popup_text)
+            if reward is not None or result is not None:
+                return reward, result, f"Read rain reward popup image ({popup_score:.2f})"
+    except (ImportError, ModuleNotFoundError):
+        return None, None, "Windows OCR packages are not installed"
+    except Exception as e:
+        if popup_score is not None:
+            popup_error = f"Reward popup image found but crop OCR failed: {e.__class__.__name__}"
+
+    try:
         text = asyncio.run(ocr_image_with_windows(screenshot))
     except (ImportError, ModuleNotFoundError):
         return None, None, "Windows OCR packages are not installed"
@@ -394,7 +537,23 @@ def read_rain_screen_details():
     if reward is not None or result is not None:
         return reward, result, "Read rain screen details"
 
-    return None, None, "Rain reward/result text not visible yet"
+    if popup_score is not None:
+        if popup_error:
+            return None, None, popup_error
+
+        return (
+            None,
+            None,
+            "Reward popup image found but amount was not parsed "
+            f"(match={popup_score:.2f}, OCR saw: {compact_ocr_preview(popup_text)})",
+        )
+
+    return (
+        None,
+        None,
+        "Reward popup image not found and rain reward/result text not visible "
+        f"(OCR saw: {compact_ocr_preview(text)})",
+    )
 
 
 def parse_battle_discount(text):
@@ -812,6 +971,32 @@ class BanditButton(ctk.CTkButton):
         )
 
 
+class FastScrollableFrame(ctk.CTkScrollableFrame):
+    def _get_fast_scroll_units(self, delta, divisor=6):
+        units = int(delta / divisor * SCROLL_WHEEL_SPEED_MULTIPLIER)
+        if units == 0 and delta:
+            units = 1 if delta > 0 else -1
+        return -units
+
+    def _mouse_wheel_all(self, event):
+        if not self.check_if_master_is_canvas(event.widget):
+            return
+
+        if sys.platform.startswith("win"):
+            units = self._get_fast_scroll_units(event.delta, 6)
+        elif sys.platform == "darwin":
+            units = self._get_fast_scroll_units(event.delta, 1)
+        else:
+            units = self._get_fast_scroll_units(getattr(event, "delta", 0) or 1, 1)
+
+        if self._shift_pressed:
+            if self._parent_canvas.xview() != (0.0, 1.0):
+                self._parent_canvas.xview("scroll", units, "units")
+        else:
+            if self._parent_canvas.yview() != (0.0, 1.0):
+                self._parent_canvas.yview("scroll", units, "units")
+
+
 # ================= UPDATES =================
 
 def split_version(version):
@@ -840,6 +1025,41 @@ def sha256_file(path):
 
 def powershell_quote(value):
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def normalize_confidence_percent(value):
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError, TclError):
+        confidence = DEFAULT_CONFIDENCE_PERCENT
+
+    if confidence <= 1.0:
+        confidence *= 100
+
+    return min(max(int(round(confidence)), 10), 100)
+
+
+def clamp_int_setting(value, default, min_value, max_value):
+    try:
+        setting = int(round(float(value)))
+    except (TypeError, ValueError, TclError):
+        setting = default
+
+    return min(max(setting, min_value), max_value)
+
+
+def clamp_float_setting(value, default, min_value, max_value, digits=1):
+    try:
+        setting = float(value)
+    except (TypeError, ValueError, TclError):
+        setting = default
+
+    return round(min(max(setting, min_value), max_value), digits)
+
+
+def format_time_12h(dt=None):
+    dt = dt or datetime.now()
+    return dt.strftime("%I:%M:%S %p").lstrip("0")
 
 
 def set_windows_app_user_model_id():
@@ -922,25 +1142,68 @@ class App(ctk.CTk):
         saved_settings = self.saved_data.get("settings", {})
         saved_stats = self.saved_data.get("stats", {})
 
-        self.confidence = ctk.DoubleVar(value=saved_settings.get("confidence", 0.65))
-        self.interval = ctk.DoubleVar(value=saved_settings.get("interval", 25.0))
-        self.move_time = ctk.DoubleVar(value=saved_settings.get("move_time", 1.5))
-        self.move_steps = ctk.IntVar(value=saved_settings.get("move_steps", 100))
+        self.confidence = ctk.IntVar(
+            value=normalize_confidence_percent(
+                saved_settings.get("confidence", DEFAULT_CONFIDENCE_PERCENT)
+            )
+        )
+        self.interval = ctk.IntVar(
+            value=clamp_int_setting(
+                saved_settings.get("interval", DEFAULT_RAIN_CLICKER_INTERVAL),
+                DEFAULT_RAIN_CLICKER_INTERVAL,
+                10,
+                90,
+            )
+        )
+        self.move_time = ctk.DoubleVar(
+            value=clamp_float_setting(
+                saved_settings.get("move_time", DEFAULT_MOVE_TIME),
+                DEFAULT_MOVE_TIME,
+                0.1,
+                5.0,
+                1,
+            )
+        )
+        self.move_steps = ctk.IntVar(
+            value=clamp_int_setting(
+                saved_settings.get("move_steps", DEFAULT_MOVE_STEPS),
+                DEFAULT_MOVE_STEPS,
+                10,
+                250,
+            )
+        )
         self.rain_collect_any_time = ctk.BooleanVar(
-            value=saved_settings.get("rain_collect_any_time", True)
+            value=saved_settings.get("rain_collect_any_time", DEFAULT_RAIN_COLLECT_ANY_TIME)
         )
         self.rain_collect_start_time = ctk.StringVar(
-            value=saved_settings.get("rain_collect_start_time", "00:00")
+            value=saved_settings.get("rain_collect_start_time", DEFAULT_RAIN_COLLECT_START_TIME)
         )
         self.rain_collect_end_time = ctk.StringVar(
-            value=saved_settings.get("rain_collect_end_time", "23:59")
+            value=saved_settings.get("rain_collect_end_time", DEFAULT_RAIN_COLLECT_END_TIME)
         )
         self.rain_collect_chance = ctk.IntVar(
-            value=int(float(saved_settings.get("rain_collect_chance", 100)))
+            value=clamp_int_setting(
+                saved_settings.get("rain_collect_chance", DEFAULT_RAIN_COLLECT_CHANCE),
+                DEFAULT_RAIN_COLLECT_CHANCE,
+                0,
+                100,
+            )
         )
-        self.weather_station_interval = ctk.IntVar(value=saved_settings.get("weather_station_interval", 15))
+        self.weather_station_interval = ctk.IntVar(
+            value=clamp_int_setting(
+                saved_settings.get("weather_station_interval", DEFAULT_WEATHER_STATION_INTERVAL),
+                DEFAULT_WEATHER_STATION_INTERVAL,
+                10,
+                90,
+            )
+        )
         self.weather_notification_volume = ctk.IntVar(
-            value=saved_settings.get("weather_notification_volume", 100)
+            value=clamp_int_setting(
+                saved_settings.get("weather_notification_volume", DEFAULT_WEATHER_NOTIFICATION_VOLUME),
+                DEFAULT_WEATHER_NOTIFICATION_VOLUME,
+                0,
+                100,
+            )
         )
         self.weather_station_warn_before_open = ctk.BooleanVar(
             value=saved_settings.get("weather_station_warn_before_open", True)
@@ -960,6 +1223,14 @@ class App(ctk.CTk):
         self.advanced_settings_enabled = ctk.BooleanVar(value=False)
         self.weather_volume_preview_job = None
         self.keep_awake_job = None
+        self.check_timer_job = None
+        self.check_timer_labels = {}
+        self.rain_collector_next_check_at = None
+        self.weather_station_next_check_at = None
+        self.rain_reward_next_check_at = None
+        self.rain_result_next_check_at = None
+        self.rain_reward_timer_status = "Off"
+        self.rain_result_timer_status = "Off"
         self.update_check_in_progress = False
         self.update_download_in_progress = False
         self.update_status_label = None
@@ -1020,6 +1291,7 @@ class App(ctk.CTk):
         self.stat_value_labels = {}
         self.active_stats_page = "Rain"
         self.after(500, self.refresh_stats_live)
+        self.check_timer_job = self.after(500, self.refresh_check_timer_labels)
         self.after(900, self.open_bandit_on_startup_if_enabled)
         self.after(1500, self.check_for_updates_on_startup)
 
@@ -1531,18 +1803,63 @@ try {{
 
         return {}
 
+    def get_setting_value(self, variable, default):
+        try:
+            return variable.get()
+        except (TclError, ValueError):
+            return default
+
     def get_current_settings(self):
         return {
-            "confidence": round(float(self.confidence.get()), 3),
-            "interval": round(float(self.interval.get()), 3),
-            "move_time": round(float(self.move_time.get()), 3),
-            "move_steps": int(self.move_steps.get()),
+            "confidence": normalize_confidence_percent(
+                self.get_setting_value(self.confidence, DEFAULT_CONFIDENCE_PERCENT)
+            ),
+            "interval": clamp_int_setting(
+                self.get_setting_value(self.interval, DEFAULT_RAIN_CLICKER_INTERVAL),
+                DEFAULT_RAIN_CLICKER_INTERVAL,
+                10,
+                90,
+            ),
+            "move_time": clamp_float_setting(
+                self.get_setting_value(self.move_time, DEFAULT_MOVE_TIME),
+                DEFAULT_MOVE_TIME,
+                0.1,
+                5.0,
+                1,
+            ),
+            "move_steps": clamp_int_setting(
+                self.get_setting_value(self.move_steps, DEFAULT_MOVE_STEPS),
+                DEFAULT_MOVE_STEPS,
+                10,
+                250,
+            ),
             "rain_collect_any_time": bool(self.rain_collect_any_time.get()),
             "rain_collect_start_time": self.rain_collect_start_time.get(),
             "rain_collect_end_time": self.rain_collect_end_time.get(),
-            "rain_collect_chance": int(self.rain_collect_chance.get()),
-            "weather_station_interval": int(self.weather_station_interval.get()),
-            "weather_notification_volume": int(self.weather_notification_volume.get()),
+            "rain_collect_chance": clamp_int_setting(
+                self.get_setting_value(self.rain_collect_chance, DEFAULT_RAIN_COLLECT_CHANCE),
+                DEFAULT_RAIN_COLLECT_CHANCE,
+                0,
+                100,
+            ),
+            "weather_station_interval": clamp_int_setting(
+                self.get_setting_value(
+                    self.weather_station_interval,
+                    DEFAULT_WEATHER_STATION_INTERVAL,
+                ),
+                DEFAULT_WEATHER_STATION_INTERVAL,
+                10,
+                90,
+            ),
+            "weather_notification_volume": clamp_int_setting(
+                self.get_setting_value(
+                    self.weather_notification_volume,
+                    DEFAULT_WEATHER_NOTIFICATION_VOLUME,
+                ),
+                DEFAULT_WEATHER_NOTIFICATION_VOLUME,
+                0,
+                100,
+            ),
             "weather_station_warn_before_open": bool(self.weather_station_warn_before_open.get()),
             "open_bandit_on_startup": bool(self.open_bandit_on_startup.get()),
             "battle_minimum_discount": round(float(self.battle_minimum_discount.get()), 1),
@@ -1693,7 +2010,7 @@ try {{
         if skipped and math.hypot(x - skipped[0], y - skipped[1]) < 30:
             return False
 
-        chance = min(max(float(self.rain_collect_chance.get()), 0.0), 100.0)
+        chance = self.get_rain_collect_chance()
         if chance <= 0:
             self.chance_skipped_rain_target = (x, y)
             return False
@@ -1714,23 +2031,113 @@ try {{
             return False, "Skipped rain target image outside rain collection time"
 
         if not self.rain_collection_chance_allowed(x, y):
-            chance = min(max(float(self.rain_collect_chance.get()), 0.0), 100.0)
+            chance = self.get_rain_collect_chance()
             return False, f"Skipped rain target image by collection chance ({chance:.0f}%)"
 
         return True, ""
 
+    def get_confidence(self):
+        return normalize_confidence_percent(
+            self.get_setting_value(self.confidence, DEFAULT_CONFIDENCE_PERCENT)
+        ) / 100.0
+
+    def get_rain_collect_chance(self):
+        return clamp_int_setting(
+            self.get_setting_value(self.rain_collect_chance, DEFAULT_RAIN_COLLECT_CHANCE),
+            DEFAULT_RAIN_COLLECT_CHANCE,
+            0,
+            100,
+        )
+
+    def get_interval_seconds(self):
+        return clamp_int_setting(
+            self.get_setting_value(self.interval, DEFAULT_RAIN_CLICKER_INTERVAL),
+            DEFAULT_RAIN_CLICKER_INTERVAL,
+            10,
+            90,
+        )
+
+    def get_move_time(self):
+        return clamp_float_setting(
+            self.get_setting_value(self.move_time, DEFAULT_MOVE_TIME),
+            DEFAULT_MOVE_TIME,
+            0.1,
+            5.0,
+            1,
+        )
+
+    def get_move_steps(self):
+        return clamp_int_setting(
+            self.get_setting_value(self.move_steps, DEFAULT_MOVE_STEPS),
+            DEFAULT_MOVE_STEPS,
+            10,
+            250,
+        )
+
+    def sleep_with_check_timer(self, attr_name, seconds, should_continue=None):
+        seconds = max(0.0, float(seconds))
+        deadline = time.time() + seconds
+        setattr(self, attr_name, deadline)
+
+        while time.time() < deadline:
+            if should_continue is not None and not should_continue():
+                return False
+            time.sleep(min(0.25, max(0.0, deadline - time.time())))
+
+        if should_continue is not None and not should_continue():
+            return False
+
+        setattr(self, attr_name, time.time())
+        return True
+
+    def set_confidence_percent(self, value):
+        self.confidence.set(normalize_confidence_percent(value))
+
+    def set_interval_setting(self, value):
+        self.interval.set(clamp_int_setting(value, DEFAULT_RAIN_CLICKER_INTERVAL, 10, 90))
+
     def set_rain_collect_chance(self, value):
-        self.rain_collect_chance.set(min(max(int(round(float(value))), 0), 100))
+        self.rain_collect_chance.set(clamp_int_setting(value, DEFAULT_RAIN_COLLECT_CHANCE, 0, 100))
+
+    def set_move_time_setting(self, value):
+        self.move_time.set(clamp_float_setting(value, DEFAULT_MOVE_TIME, 0.1, 5.0, 1))
+
+    def set_move_steps_setting(self, value):
+        self.move_steps.set(clamp_int_setting(value, DEFAULT_MOVE_STEPS, 10, 250))
+
+    def set_weather_station_interval_setting(self, value):
+        self.weather_station_interval.set(
+            clamp_int_setting(value, DEFAULT_WEATHER_STATION_INTERVAL, 10, 90)
+        )
+
+    def set_weather_notification_volume(self, value):
+        self.weather_notification_volume.set(
+            clamp_int_setting(value, DEFAULT_WEATHER_NOTIFICATION_VOLUME, 0, 100)
+        )
 
     def apply_rain_settings(self):
-        self.confidence.set(min(max(float(self.confidence.get()), 0.1), 1.0))
-        self.interval.set(min(max(float(self.interval.get()), 10.0), 90.0))
-        self.move_time.set(min(max(float(self.move_time.get()), 0.1), 5.0))
-        self.move_steps.set(min(max(int(float(self.move_steps.get())), 10), 250))
-        self.rain_collect_chance.set(min(max(int(float(self.rain_collect_chance.get())), 0), 100))
-        self.weather_station_interval.set(min(max(int(float(self.weather_station_interval.get())), 10), 90))
-        self.weather_notification_volume.set(
-            min(max(int(float(self.weather_notification_volume.get())), 0), 100)
+        self.set_confidence_percent(
+            self.get_setting_value(self.confidence, DEFAULT_CONFIDENCE_PERCENT)
+        )
+        self.set_interval_setting(
+            self.get_setting_value(self.interval, DEFAULT_RAIN_CLICKER_INTERVAL)
+        )
+        self.set_move_time_setting(self.get_setting_value(self.move_time, DEFAULT_MOVE_TIME))
+        self.set_move_steps_setting(self.get_setting_value(self.move_steps, DEFAULT_MOVE_STEPS))
+        self.set_rain_collect_chance(
+            self.get_setting_value(self.rain_collect_chance, DEFAULT_RAIN_COLLECT_CHANCE)
+        )
+        self.set_weather_station_interval_setting(
+            self.get_setting_value(
+                self.weather_station_interval,
+                DEFAULT_WEATHER_STATION_INTERVAL,
+            )
+        )
+        self.set_weather_notification_volume(
+            self.get_setting_value(
+                self.weather_notification_volume,
+                DEFAULT_WEATHER_NOTIFICATION_VOLUME,
+            )
         )
 
         start_time = self.normalize_time_setting(self.rain_collect_start_time.get())
@@ -1774,7 +2181,7 @@ try {{
         self.refresh_stats_now()
 
     def preview_weather_notification_volume(self, value):
-        self.weather_notification_volume.set(int(round(float(value))))
+        self.set_weather_notification_volume(value)
 
         if self.weather_volume_preview_job:
             self.after_cancel(self.weather_volume_preview_job)
@@ -1790,7 +2197,17 @@ try {{
 
         threading.Thread(
             target=play_rain_alert_sound,
-            args=(self.weather_notification_volume.get(),),
+            args=(
+                clamp_int_setting(
+                    self.get_setting_value(
+                        self.weather_notification_volume,
+                        DEFAULT_WEATHER_NOTIFICATION_VOLUME,
+                    ),
+                    DEFAULT_WEATHER_NOTIFICATION_VOLUME,
+                    0,
+                    100,
+                ),
+            ),
             daemon=True,
         ).start()
 
@@ -1809,7 +2226,7 @@ try {{
         if auto and not self.open_bandit_on_startup.get():
             return False
 
-        if bandit_appears_open_in_window_titles():
+        if auto and bandit_appears_open_in_window_titles():
             message = "Bandit.camp already appears open"
             self.show_rain_settings_message(message, COLORS["muted"])
             self.log(message)
@@ -1834,6 +2251,29 @@ try {{
     def toggle_open_bandit_on_startup(self):
         saved = self.save_data()
         message = "Bandit startup setting saved" if saved else "Save failed"
+        self.show_rain_settings_message(
+            message,
+            COLORS["green"] if saved else COLORS["red2"],
+        )
+        self.log(message)
+
+    def reset_default_settings(self):
+        self.confidence.set(DEFAULT_CONFIDENCE_PERCENT)
+        self.interval.set(DEFAULT_RAIN_CLICKER_INTERVAL)
+        self.move_time.set(DEFAULT_MOVE_TIME)
+        self.move_steps.set(DEFAULT_MOVE_STEPS)
+        self.rain_collect_any_time.set(DEFAULT_RAIN_COLLECT_ANY_TIME)
+        self.rain_collect_start_time.set(DEFAULT_RAIN_COLLECT_START_TIME)
+        self.rain_collect_end_time.set(DEFAULT_RAIN_COLLECT_END_TIME)
+        self.rain_collect_chance.set(DEFAULT_RAIN_COLLECT_CHANCE)
+        self.weather_station_interval.set(DEFAULT_WEATHER_STATION_INTERVAL)
+        self.weather_notification_volume.set(DEFAULT_WEATHER_NOTIFICATION_VOLUME)
+        self.weather_station_warn_before_open.set(True)
+        self.open_bandit_on_startup.set(False)
+        self.sync_rain_time_window_controls()
+
+        saved = self.save_data()
+        message = "Default settings restored" if saved else "Save failed"
         self.show_rain_settings_message(
             message,
             COLORS["green"] if saved else COLORS["red2"],
@@ -1910,6 +2350,69 @@ try {{
         if seconds or not parts:
             parts.append(f"{seconds}S")
         return " ".join(parts)
+
+    def format_countdown(self, next_check_at, active, status=None):
+        if not active:
+            return "Off"
+
+        if status:
+            return status
+
+        if next_check_at is None:
+            return "Checking now"
+
+        remaining = int(math.ceil(next_check_at - time.time()))
+        if remaining <= 0:
+            return "Checking now"
+
+        return f"{remaining}s"
+
+    def get_check_timer_values(self):
+        return {
+            "rain_collector": self.format_countdown(
+                self.rain_collector_next_check_at,
+                self.running,
+            ),
+            "weather_station": self.format_countdown(
+                self.weather_station_next_check_at,
+                self.weather_station_active,
+            ),
+            "reward_checker": self.format_countdown(
+                self.rain_reward_next_check_at,
+                self.rain_reward_tracker_active,
+                self.rain_reward_timer_status
+                if self.rain_reward_tracker_active and self.rain_reward_timer_status != "Off"
+                else None,
+            ),
+            "result_checker": self.format_countdown(
+                self.rain_result_next_check_at,
+                self.rain_reward_tracker_active,
+                self.rain_result_timer_status
+                if self.rain_reward_tracker_active and self.rain_result_timer_status != "Off"
+                else None,
+            ),
+        }
+
+    def refresh_check_timer_labels(self):
+        if self.closing:
+            return
+
+        values = self.get_check_timer_values()
+        stale_keys = []
+
+        for key, label in self.check_timer_labels.items():
+            try:
+                if not label.winfo_exists():
+                    stale_keys.append(key)
+                    continue
+                label.configure(text=values.get(key, "Off"))
+            except (TclError, RuntimeError):
+                stale_keys.append(key)
+
+        for key in stale_keys:
+            self.check_timer_labels.pop(key, None)
+
+        self.check_timer_job = self.after(500, self.refresh_check_timer_labels)
 
     def format_last_rain_detected(self):
         if not self.last_rain_time or self.last_rain_time == "--":
@@ -2223,6 +2726,95 @@ try {{
             self.stats_page(self.active_stats_page)
         self.log("Stats reset")
 
+    def apply_imported_stats(self, stats):
+        self.total_search_time_seconds = float(stats.get("total_search_time_seconds", 0.0))
+        self.total_rains_clicked = int(stats.get("total_rains_clicked", stats.get("click_count", 0)))
+        self.total_rain_collected = float(stats.get("total_rain_collected", 0.0))
+        self.last_rain_reward = float(stats.get("last_rain_reward", 0.0))
+        self.rain_reward_history = self.clean_rain_reward_history(stats.get("rain_reward_history", []))
+        self.rain_result_history = self.clean_rain_result_history(stats.get("rain_result_history", []))
+        self.total_weather_station_time_seconds = float(stats.get("total_weather_station_time_seconds", 0.0))
+        self.total_weather_notifications = int(stats.get("total_weather_notifications", 0))
+        self.last_weather_notification_key = stats.get("last_weather_notification_key")
+        self.last_rain_time = stats.get("last_rain_time", "--")
+        self.last_action = stats.get("last_action", "Stats imported")
+        self.error_count = int(stats.get("error_count", 0))
+
+        if self.running:
+            self.start_rain_session()
+        else:
+            self.current_session_seconds = float(stats.get("current_session_seconds", 0.0))
+            self.current_session_rains_clicked = int(stats.get("current_session_rains_clicked", 0))
+            self.current_session_rain_collected = float(stats.get("current_session_rain_collected", 0.0))
+            self.current_session_started_label = stats.get("current_session_started_label", "--")
+
+        if self.weather_station_active:
+            self.current_weather_session_seconds = 0.0
+            self.current_weather_session_notifications = 0
+            self.current_weather_session_started_label = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.weather_station_started_at = time.time()
+        else:
+            self.current_weather_session_seconds = float(stats.get("current_weather_session_seconds", 0.0))
+            self.current_weather_session_notifications = int(stats.get("current_weather_session_notifications", 0))
+            self.current_weather_session_started_label = stats.get("current_weather_session_started_label", "--")
+
+    def export_stats(self):
+        path = filedialog.asksaveasfilename(
+            title="Export RainBarrel stats",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialfile=f"rainbarrel_stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+        )
+        if not path:
+            return
+
+        data = {
+            "app": APP_NAME,
+            "version": APP_VERSION,
+            "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "stats": self.get_current_stats(),
+        }
+
+        try:
+            with open(path, "w", encoding="utf-8") as file:
+                json.dump(data, file, indent=2)
+        except OSError as e:
+            self.log(f"Stats export failed: {e.__class__.__name__}")
+            return
+
+        self.log(f"Stats exported to {path}")
+
+    def import_stats(self):
+        path = filedialog.askopenfilename(
+            title="Import RainBarrel stats",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+        except (OSError, json.JSONDecodeError) as e:
+            self.log(f"Stats import failed: {e.__class__.__name__}")
+            return
+
+        stats = data.get("stats", data) if isinstance(data, dict) else None
+        if not isinstance(stats, dict):
+            self.log("Stats import failed: no stats object found")
+            return
+
+        try:
+            self.apply_imported_stats(stats)
+        except (TypeError, ValueError) as e:
+            self.log(f"Stats import failed: {e.__class__.__name__}")
+            return
+
+        self.save_stats()
+        if self.current_page == "Stats":
+            self.stats_page(self.active_stats_page)
+        self.log(f"Stats imported from {path}")
+
     def save_stats(self):
         self.save_data()
         self.refresh_topbar_total()
@@ -2238,6 +2830,10 @@ try {{
             self.rain_reward_tracker_run_id += 1
             run_id = self.rain_reward_tracker_run_id
             self.rain_reward_tracker_active = True
+            self.rain_reward_next_check_at = time.time()
+            self.rain_result_next_check_at = None
+            self.rain_reward_timer_status = ""
+            self.rain_result_timer_status = "Waiting for reward"
 
         self.log("Rain reward tracker started")
         threading.Thread(target=self.rain_reward_tracker_worker, args=(run_id,), daemon=True).start()
@@ -2248,13 +2844,43 @@ try {{
         own_reward = None
         reward_found_at = None
         tracked_result = False
+        reward_parse_warning_logged = False
 
         try:
             while time.time() < deadline and run_id == self.rain_reward_tracker_run_id:
+                now = time.time()
+                if own_reward is None:
+                    self.rain_reward_next_check_at = now
+                    self.rain_reward_timer_status = ""
+                    self.rain_result_next_check_at = None
+                    self.rain_result_timer_status = "Waiting for reward"
+                else:
+                    self.rain_reward_next_check_at = None
+                    self.rain_reward_timer_status = "Reward found"
+                    self.rain_result_timer_status = ""
+                    self.rain_result_next_check_at = max(
+                        now,
+                        reward_found_at + RAIN_RESULT_MIN_WAIT_AFTER_REWARD_SECONDS,
+                    )
+
                 amount, result, detail = read_rain_screen_details()
+                if (
+                    amount is None
+                    and not reward_parse_warning_logged
+                    and detail.startswith("Reward popup image found")
+                ):
+                    reward_parse_warning_logged = True
+                    self.log(detail)
+
                 if amount is not None and own_reward is None:
                     own_reward = round(float(amount), 2)
                     reward_found_at = time.time()
+                    self.rain_reward_next_check_at = None
+                    self.rain_reward_timer_status = "Reward found"
+                    self.rain_result_timer_status = ""
+                    self.rain_result_next_check_at = (
+                        reward_found_at + RAIN_RESULT_MIN_WAIT_AFTER_REWARD_SECONDS
+                    )
                     self.after(0, lambda value=own_reward: self.record_rain_reward(value))
 
                 result_wait_finished = (
@@ -2269,6 +2895,24 @@ try {{
                     tracked_result = True
                     return
 
+                if own_reward is None:
+                    self.rain_reward_next_check_at = time.time() + RAIN_REWARD_SCAN_INTERVAL_SECONDS
+                    self.rain_reward_timer_status = ""
+                    self.rain_result_next_check_at = None
+                    self.rain_result_timer_status = "Waiting for reward"
+                elif result_wait_finished:
+                    self.rain_reward_next_check_at = None
+                    self.rain_reward_timer_status = "Reward found"
+                    self.rain_result_timer_status = ""
+                    self.rain_result_next_check_at = time.time() + RAIN_REWARD_SCAN_INTERVAL_SECONDS
+                else:
+                    self.rain_reward_next_check_at = None
+                    self.rain_reward_timer_status = "Reward found"
+                    self.rain_result_timer_status = ""
+                    self.rain_result_next_check_at = (
+                        reward_found_at + RAIN_RESULT_MIN_WAIT_AFTER_REWARD_SECONDS
+                    )
+
                 last_detail = detail
                 time.sleep(RAIN_REWARD_SCAN_INTERVAL_SECONDS)
 
@@ -2278,6 +2922,10 @@ try {{
             with self.rain_reward_lock:
                 if run_id == self.rain_reward_tracker_run_id:
                     self.rain_reward_tracker_active = False
+                    self.rain_reward_next_check_at = None
+                    self.rain_result_next_check_at = None
+                    self.rain_reward_timer_status = "Off"
+                    self.rain_result_timer_status = "Off"
 
     def record_rain_reward(self, amount):
         amount = round(float(amount), 2)
@@ -2370,6 +3018,12 @@ try {{
         self.weather_station_driver = None
         self.weather_station_active = False
         self.weather_station_run_id += 1
+        self.rain_collector_next_check_at = None
+        self.weather_station_next_check_at = None
+        self.rain_reward_next_check_at = None
+        self.rain_result_next_check_at = None
+        self.rain_reward_timer_status = "Off"
+        self.rain_result_timer_status = "Off"
 
         try:
             self.weather_station_enabled.set(False)
@@ -2382,6 +3036,13 @@ try {{
             except Exception:
                 pass
             self.keep_awake_job = None
+
+        if self.check_timer_job:
+            try:
+                self.after_cancel(self.check_timer_job)
+            except Exception:
+                pass
+            self.check_timer_job = None
 
         try:
             self.stop_rain_session()
@@ -2422,7 +3083,7 @@ try {{
         )
         self.left_id = self.canvas.create_window(0, 58, anchor="nw", window=self.left_panel_container)
 
-        self.left_panel = ctk.CTkScrollableFrame(
+        self.left_panel = FastScrollableFrame(
             self.left_panel_container,
             width=285,
             height=622,
@@ -2631,6 +3292,7 @@ try {{
             0,
             100,
             command=self.preview_weather_notification_volume,
+            step=1,
         )
 
         ctk.CTkFrame(self.left_panel, height=1, fg_color="#24201d").pack(fill="x", padx=18, pady=14)
@@ -2648,6 +3310,7 @@ try {{
             0,
             100,
             command=self.set_rain_collect_chance,
+            step=1,
         )
 
         self.rain_collect_any_time_switch = ctk.CTkSwitch(
@@ -2676,17 +3339,59 @@ try {{
         self.advanced_settings_btn.pack(fill="x", padx=18, pady=(4, 6))
 
         if self.advanced_settings_enabled.get():
-            self.add_setting("Confidence", self.confidence, 0.1, 1.0)
-            self.add_setting("Rain Clicker Check Delay", self.interval, 10, 90)
-            self.add_setting("Move Time", self.move_time, 0.1, 5.0)
-            self.add_setting("Move Steps", self.move_steps, 10, 250)
-            self.add_setting("Weather Station Check Interval", self.weather_station_interval, 10, 90)
+            self.add_setting(
+                "Confidence Percent",
+                self.confidence,
+                10,
+                100,
+                command=self.set_confidence_percent,
+                step=1,
+            )
+            self.add_setting(
+                "Rain Clicker Check Delay",
+                self.interval,
+                10,
+                90,
+                command=self.set_interval_setting,
+                step=1,
+            )
+            self.add_setting(
+                "Move Time",
+                self.move_time,
+                0.1,
+                5.0,
+                command=self.set_move_time_setting,
+                step=0.1,
+            )
+            self.add_setting(
+                "Move Steps",
+                self.move_steps,
+                10,
+                250,
+                command=self.set_move_steps_setting,
+                step=1,
+            )
+            self.add_setting(
+                "Weather Station Check Interval",
+                self.weather_station_interval,
+                10,
+                90,
+                command=self.set_weather_station_interval_setting,
+                step=1,
+            )
+            self.add_check_timer_panel()
 
         BanditButton(
             self.left_panel,
             text="APPLY",
             command=self.apply_rain_settings,
         ).pack(fill="x", padx=18, pady=(12, 6))
+
+        BanditButton(
+            self.left_panel,
+            text="RESET DEFAULT SETTINGS",
+            command=self.reset_default_settings,
+        ).pack(fill="x", padx=18, pady=(0, 6))
 
         self.settings_status_label = ctk.CTkLabel(
             self.left_panel,
@@ -2862,6 +3567,7 @@ try {{
         self.weather_station_active = False
         self.weather_station_enabled.set(False)
         self.weather_station_run_id += 1
+        self.weather_station_next_check_at = None
         self.stop_weather_station_timer()
 
         driver = self.weather_station_driver
@@ -2886,6 +3592,7 @@ try {{
                 return
             self.weather_station_run_id += 1
             self.start_weather_station_timer()
+            self.weather_station_next_check_at = time.time()
             self.set_weather_station_status("Checking weather station now...", COLORS["orange"])
             self.refresh_keep_awake_state()
             self.start_weather_station()
@@ -2917,6 +3624,41 @@ try {{
         self.weather_station_thread.run_id = self.weather_station_run_id
         self.weather_station_thread.start()
 
+    def mark_weather_station_browser(self, driver):
+        try:
+            driver.execute_script("document.title = 'RainBarrel Weather Station';")
+        except Exception:
+            pass
+
+    def get_weather_station_shutdown_messages(self, error=None):
+        if error is None:
+            return (
+                "Weather station off (Chrome closed)",
+                "Weather station turned off because Chrome was closed",
+            )
+
+        detail = str(error).lower()
+        closed_markers = [
+            "closed",
+            "invalid session",
+            "no such window",
+            "target window",
+            "disconnected",
+            "not connected",
+            "web view not found",
+        ]
+
+        if any(marker in detail for marker in closed_markers):
+            return (
+                "Weather station off (Chrome closed)",
+                "Weather station turned off because Chrome was closed",
+            )
+
+        return (
+            "Weather station off (Chrome unavailable)",
+            f"Weather station turned off: {error.__class__.__name__}",
+        )
+
     def set_weather_station_status(self, text, color=None):
         self.weather_station_status = text
 
@@ -2927,7 +3669,7 @@ try {{
             )
 
     def report_weather_station_result(self, state, detail, notification_key=None):
-        timestamp = datetime.now().strftime("%H:%M:%S")
+        timestamp = format_time_12h()
 
         if state is True:
             status = f"Rain active as of {timestamp}"
@@ -2953,7 +3695,17 @@ try {{
             self.save_stats()
             threading.Thread(
                 target=play_rain_alert_sound,
-                args=(self.weather_notification_volume.get(),),
+                args=(
+                    clamp_int_setting(
+                        self.get_setting_value(
+                            self.weather_notification_volume,
+                            DEFAULT_WEATHER_NOTIFICATION_VOLUME,
+                        ),
+                        DEFAULT_WEATHER_NOTIFICATION_VOLUME,
+                        0,
+                        100,
+                    ),
+                ),
                 daemon=True,
             ).start()
 
@@ -2965,11 +3717,32 @@ try {{
         rain_value = None
         rain_user_count = None
         rain_notification_key = None
-        close_reason = None
+        shutdown_status = None
+        shutdown_log = None
+
+        def weather_station_should_continue():
+            nonlocal shutdown_status, shutdown_log
+
+            if not self.weather_station_active or run_id != self.weather_station_run_id:
+                return False
+
+            if driver is None:
+                return True
+
+            try:
+                if not driver.window_handles:
+                    shutdown_status, shutdown_log = self.get_weather_station_shutdown_messages()
+                    return False
+            except Exception as e:
+                shutdown_status, shutdown_log = self.get_weather_station_shutdown_messages(e)
+                return False
+
+            return True
 
         try:
             while self.weather_station_active and run_id == self.weather_station_run_id:
                 try:
+                    self.weather_station_next_check_at = time.time()
                     if driver is None:
                         driver, browser_name = create_weather_station_driver()
                         self.weather_station_driver = driver
@@ -2995,6 +3768,7 @@ try {{
                                 raise RuntimeError(detail)
                             browser_ready = state is True
                             if browser_ready:
+                                self.mark_weather_station_browser(driver)
                                 try:
                                     driver.minimize_window()
                                 except Exception:
@@ -3005,9 +3779,11 @@ try {{
                             now_ms = int(time.time() * 1000)
                             for event_type, payload in get_weather_station_rain_frames(driver):
                                 if event_type == "rain":
-                                    started_at = int(payload.get("startedAt", now_ms))
-                                    duration = int(payload.get("duration", 0))
-                                    rain_active_until_ms = started_at + duration
+                                    started_at = parse_epoch_millis(payload.get("startedAt")) or now_ms
+                                    rain_active_until_ms = parse_weather_rain_active_until_ms(
+                                        payload,
+                                        now_ms,
+                                    )
                                     rain_value = payload.get("value")
                                     parsed_rain_value = parse_scrap_number(rain_value)
                                     if parsed_rain_value is not None:
@@ -3035,7 +3811,7 @@ try {{
                                 else:
                                     state, detail = False, "No active rain websocket event"
                 except Exception as e:
-                    close_reason = f"Chrome closed or became unavailable ({e.__class__.__name__}: {e})"
+                    shutdown_status, shutdown_log = self.get_weather_station_shutdown_messages(e)
                     break
 
                 self.after(
@@ -3043,11 +3819,22 @@ try {{
                     lambda s=state, d=detail, k=rain_notification_key: self.report_weather_station_result(s, d, k),
                 )
 
-                delay = min(max(int(float(self.weather_station_interval.get())), 10), 90)
-                for _ in range(delay):
-                    if not self.weather_station_active or run_id != self.weather_station_run_id:
-                        break
-                    time.sleep(1)
+                delay = clamp_int_setting(
+                    self.get_setting_value(
+                        self.weather_station_interval,
+                        DEFAULT_WEATHER_STATION_INTERVAL,
+                    ),
+                    DEFAULT_WEATHER_STATION_INTERVAL,
+                    10,
+                    90,
+                )
+                self.sleep_with_check_timer(
+                    "weather_station_next_check_at",
+                    delay,
+                    should_continue=weather_station_should_continue,
+                )
+                if shutdown_status:
+                    break
         finally:
             if driver is not None:
                 try:
@@ -3056,14 +3843,16 @@ try {{
                     pass
             if self.weather_station_driver is driver:
                 self.weather_station_driver = None
+            if run_id == self.weather_station_run_id:
+                self.weather_station_next_check_at = None
             if self.weather_station_thread is not None and getattr(self.weather_station_thread, "run_id", None) == run_id:
                 self.weather_station_thread = None
-            if close_reason and run_id == self.weather_station_run_id:
+            if shutdown_status and run_id == self.weather_station_run_id:
                 self.after(
                     0,
-                    lambda reason=close_reason: self.disable_weather_station(
-                        status_text=reason,
-                        log_message="Weather station turned off because Chrome was closed",
+                    lambda status=shutdown_status, log=shutdown_log: self.disable_weather_station(
+                        status_text=status,
+                        log_message=log,
                     ),
                 )
 
@@ -3143,6 +3932,51 @@ try {{
         self.rain_collect_end_entry.grid(row=2, column=1, sticky="ew", padx=(6, 12), pady=(0, 12))
         self.sync_rain_time_window_controls()
 
+    def add_check_timer_panel(self):
+        box = ctk.CTkFrame(self.left_panel, fg_color="#111411", corner_radius=12)
+        box.pack(fill="x", padx=14, pady=8)
+        box.grid_columnconfigure(0, weight=1)
+        box.grid_columnconfigure(1, weight=0)
+
+        ctk.CTkLabel(
+            box,
+            text="CHECK TIMERS",
+            text_color=COLORS["text"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(10, 6))
+
+        values = self.get_check_timer_values()
+        rows = [
+            ("Rain Collector", "rain_collector"),
+            ("Weather Station", "weather_station"),
+            ("Reward Checker", "reward_checker"),
+            ("Results Checker", "result_checker"),
+        ]
+
+        for row_index, (label_text, key) in enumerate(rows, start=1):
+            ctk.CTkLabel(
+                box,
+                text=label_text,
+                text_color=COLORS["muted"],
+                font=ctk.CTkFont(size=12),
+            ).grid(row=row_index, column=0, sticky="w", padx=12, pady=3)
+
+            value_label = ctk.CTkLabel(
+                box,
+                text=values.get(key, "Off"),
+                text_color=COLORS["red2"],
+                font=ctk.CTkFont(size=12, weight="bold"),
+            )
+            value_label.grid(row=row_index, column=1, sticky="e", padx=12, pady=3)
+            self.check_timer_labels[key] = value_label
+
+        ctk.CTkFrame(box, height=4, fg_color="transparent").grid(
+            row=len(rows) + 1,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+        )
+
     def sync_rain_time_window_controls(self):
         state = "disabled" if self.rain_collect_any_time.get() else "normal"
         border_color = "#24201d" if state == "disabled" else "#30251f"
@@ -3158,7 +3992,7 @@ try {{
                     text_color=text_color,
                 )
 
-    def add_setting(self, label, variable, min_v, max_v, command=None):
+    def add_setting(self, label, variable, min_v, max_v, command=None, step=None):
         box = ctk.CTkFrame(self.left_panel, fg_color="#111411", corner_radius=12)
         box.pack(fill="x", padx=14, pady=8)
 
@@ -3169,16 +4003,21 @@ try {{
             font=ctk.CTkFont(size=12, weight="bold"),
         ).pack(anchor="w", padx=12, pady=(10, 2))
 
-        ctk.CTkSlider(
-            box,
-            from_=min_v,
-            to=max_v,
-            variable=variable,
-            command=command,
-            progress_color=COLORS["red"],
-            button_color=COLORS["red2"],
-            button_hover_color="#ff8a6c",
-        ).pack(fill="x", padx=12, pady=(4, 8))
+        slider_options = {
+            "master": box,
+            "from_": min_v,
+            "to": max_v,
+            "variable": variable,
+            "command": command,
+            "progress_color": COLORS["red"],
+            "button_color": COLORS["red2"],
+            "button_hover_color": "#ff8a6c",
+        }
+
+        if step is not None:
+            slider_options["number_of_steps"] = max(1, int(round((max_v - min_v) / step)))
+
+        ctk.CTkSlider(**slider_options).pack(fill="x", padx=12, pady=(4, 8))
 
         ctk.CTkEntry(
             box,
@@ -3219,14 +4058,30 @@ try {{
 
     # ================= PAGE SYSTEM =================
 
+    def reset_scroll_frame(self, scroll_frame):
+        try:
+            if not scroll_frame.winfo_exists():
+                return
+
+            canvas = getattr(scroll_frame, "_parent_canvas", None)
+            if canvas is None:
+                return
+
+            canvas.yview_moveto(0)
+            canvas.xview_moveto(0)
+        except (TclError, RuntimeError):
+            pass
+
     def clear_content(self):
         self.hourly_chart_canvas = None
         for child in self.content.winfo_children():
             child.destroy()
 
     def clear_left_panel(self):
+        self.check_timer_labels = {}
         for child in self.left_panel.winfo_children():
             child.destroy()
+        self.reset_scroll_frame(self.left_panel)
 
     def show_page(self, page):
         self.current_page = page
@@ -3252,6 +4107,7 @@ try {{
             self.build_stats_left_panel()
             self.stats_page("Rain")
 
+        self.after(0, lambda: self.reset_scroll_frame(self.left_panel))
         self.after(0, self.force_resize)
 
     def page_title(self, title, subtitle):
@@ -3441,7 +4297,19 @@ try {{
             command=self.reset_stats,
         ).pack(side="right")
 
-        scroll = ctk.CTkScrollableFrame(
+        BanditButton(
+            action_row,
+            text="IMPORT STATS",
+            command=self.import_stats,
+        ).pack(side="right", padx=(0, 8))
+
+        BanditButton(
+            action_row,
+            text="EXPORT STATS",
+            command=self.export_stats,
+        ).pack(side="right", padx=(0, 8))
+
+        scroll = FastScrollableFrame(
             self.content,
             fg_color="transparent",
             corner_radius=0,
@@ -3449,6 +4317,7 @@ try {{
             scrollbar_button_hover_color="#453931",
         )
         scroll.pack(fill="both", expand=True, padx=0, pady=(0, 18))
+        self.after(0, lambda frame=scroll: self.reset_scroll_frame(frame))
 
         for section_title, rows in self.get_stats_sections(stat_page):
             stats = ctk.CTkFrame(
@@ -3651,7 +4520,7 @@ try {{
             try:
                 matches, screenshot, monitor = locate_image_matches_all_monitors(
                     BATTLE_DISCOUNT_IMAGE_PATH,
-                    confidence=max(0.55, float(self.confidence.get()) - 0.05),
+                    confidence=max(0.55, self.get_confidence() - 0.05),
                     max_matches=8,
                 )
 
@@ -3680,8 +4549,8 @@ try {{
                     move_cursor_smooth(
                         click_x,
                         click_y,
-                        total_time=self.move_time.get(),
-                        steps=int(self.move_steps.get()),
+                        total_time=self.get_move_time(),
+                        steps=self.get_move_steps(),
                     )
 
                     if not self.battle_running or run_id != self.battle_run_id:
@@ -3716,6 +4585,7 @@ try {{
 
         if self.running:
             self.rain_scan_found_last_check = None
+            self.rain_collector_next_check_at = time.time()
             self.start_rain_session()
             self.save_stats()
             self.refresh_keep_awake_state()
@@ -3724,6 +4594,7 @@ try {{
             threading.Thread(target=self.worker, daemon=True).start()
         else:
             self.stop_rain_session()
+            self.rain_collector_next_check_at = None
             self.save_stats()
             self.refresh_keep_awake_state()
             self.sync_rain_clicker_controls()
@@ -3732,7 +4603,8 @@ try {{
     def worker(self):
         while self.running:
             try:
-                match = locate_image_all_monitors(IMAGE_PATH, self.confidence.get())
+                self.rain_collector_next_check_at = time.time()
+                match = locate_image_all_monitors(IMAGE_PATH, self.get_confidence())
 
                 if match:
                     self.rain_scan_found_last_check = True
@@ -3746,14 +4618,18 @@ try {{
                         self.last_action = skip_reason
                         self.after(0, self.save_stats)
                         self.log(skip_reason)
-                        time.sleep(2)
+                        self.sleep_with_check_timer(
+                            "rain_collector_next_check_at",
+                            2,
+                            should_continue=lambda: self.running,
+                        )
                         continue
 
                     move_cursor_smooth(
                         x,
                         y,
-                        total_time=self.move_time.get(),
-                        steps=int(self.move_steps.get()),
+                        total_time=self.get_move_time(),
+                        steps=self.get_move_steps(),
                     )
 
                     if not self.running:
@@ -3775,11 +4651,15 @@ try {{
                     move_cursor_smooth(
                         move_away_x,
                         move_away_y,
-                        total_time=self.move_time.get(),
-                        steps=int(self.move_steps.get()),
+                        total_time=self.get_move_time(),
+                        steps=self.get_move_steps(),
                     )
 
-                    time.sleep(2)
+                    self.sleep_with_check_timer(
+                        "rain_collector_next_check_at",
+                        2,
+                        should_continue=lambda: self.running,
+                    )
                 else:
                     self.chance_skipped_rain_target = None
                     if self.rain_scan_found_last_check is not False:
@@ -3792,7 +4672,13 @@ try {{
                 self.after(0, self.save_stats)
                 self.log(f"Error: {type(e).__name__}: {repr(e)}")
 
-            time.sleep(self.interval.get())
+            self.sleep_with_check_timer(
+                "rain_collector_next_check_at",
+                self.get_interval_seconds(),
+                should_continue=lambda: self.running,
+            )
+
+        self.rain_collector_next_check_at = None
 
 
 if __name__ == "__main__":
