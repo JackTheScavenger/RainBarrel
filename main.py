@@ -42,7 +42,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.9"
+APP_VERSION = "1.1.10"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIDENCE_PERCENT = 65
@@ -101,12 +101,17 @@ UPDATE_DOWNLOAD_TIMEOUT_SECONDS = 5 * 60
 SELENIUM_PAGE_WAIT = 45
 RAIN_REWARD_WATCH_SECONDS = 3 * 60
 RAIN_RESULT_WATCH_SECONDS = 3 * 60
+RAIN_FOUND_COOLDOWN_SECONDS = 3 * 60
+WEATHER_RAIN_FOUND_COOLDOWN_SECONDS = 3 * 60
 RAIN_REWARD_SCAN_INTERVAL_SECONDS = 1
 RAIN_RESULT_SCAN_INTERVAL_SECONDS = 1
 RAIN_REWARD_POPUP_CONFIDENCE = 0.55
 RAIN_REWARD_POPUP_TEMPLATE_SCALES = (0.75, 0.85, 0.95, 1.0, 1.1, 1.25, 1.4, 1.6)
+RAIN_REWARD_TEMPLATE_IGNORE_RECTS = ((0.31, 0.45, 0.99, 0.95),)
 RAIN_REWARD_POPUP_CROP_WIDTH = 520
 RAIN_REWARD_POPUP_CROP_HEIGHT = 180
+RAIN_RESULT_MIN_BOX_WIDTH = 180
+RAIN_RESULT_MIN_BOX_HEIGHT = 60
 OCR_PREVIEW_LIMIT = 140
 RAIN_REWARD_HISTORY_LIMIT = 100
 RAIN_LOG_HISTORY_LIMIT = 500
@@ -309,6 +314,13 @@ def parse_rain_reward_amount(text):
                     return float(numbers[0].replace(",", "."))
                 except ValueError:
                     return None
+        if re.search(r"\brakeback\s+rain\b", text, re.IGNORECASE):
+            scrap_match = re.search(r"([0-9]+(?:[.,][0-9]+)?)\s*scrap\b", text, re.IGNORECASE)
+            if scrap_match:
+                try:
+                    return float(scrap_match.group(1).replace(",", "."))
+                except ValueError:
+                    return None
         return None
 
     try:
@@ -414,7 +426,7 @@ def compact_ocr_preview(text, limit=OCR_PREVIEW_LIMIT):
     return preview
 
 
-def locate_image_in_pil(image, image_path, confidence=0.7, scales=(1.0,)):
+def locate_image_in_pil(image, image_path, confidence=0.7, scales=(1.0,), ignore_rects=()):
     if not os.path.exists(image_path):
         return None, None
 
@@ -440,7 +452,25 @@ def locate_image_in_pil(image, image_path, confidence=0.7, scales=(1.0,)):
             (target_w, target_h),
             interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC,
         )
-        result = cv2.matchTemplate(screen_gray, scaled_target, cv2.TM_CCOEFF_NORMED)
+
+        if ignore_rects:
+            scaled_mask = np.full((target_h, target_w), 255, dtype=np.uint8)
+            for left_ratio, top_ratio, right_ratio, bottom_ratio in ignore_rects:
+                left = min(max(0, int(target_w * left_ratio)), target_w)
+                top = min(max(0, int(target_h * top_ratio)), target_h)
+                right = min(max(left, int(target_w * right_ratio)), target_w)
+                bottom = min(max(top, int(target_h * bottom_ratio)), target_h)
+                scaled_mask[top:bottom, left:right] = 0
+            result = cv2.matchTemplate(
+                screen_gray,
+                scaled_target,
+                cv2.TM_CCORR_NORMED,
+                mask=scaled_mask,
+            )
+        else:
+            result = cv2.matchTemplate(screen_gray, scaled_target, cv2.TM_CCOEFF_NORMED)
+
+        result = np.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0)
         _, max_val, _, max_loc = cv2.minMaxLoc(result)
         if max_val > best_score:
             best_score = float(max_val)
@@ -465,6 +495,7 @@ def crop_rain_reward_popup(screenshot):
         RAIN_REWARD_IMAGE_PATH,
         confidence=RAIN_REWARD_POPUP_CONFIDENCE,
         scales=RAIN_REWARD_POPUP_TEMPLATE_SCALES,
+        ignore_rects=RAIN_REWARD_TEMPLATE_IGNORE_RECTS,
     )
     if not match:
         return None, best_score
@@ -479,6 +510,47 @@ def crop_rain_reward_popup(screenshot):
         crop = crop.resize((crop.width * 2, crop.height * 2), Image.LANCZOS)
 
     return crop, match["score"]
+
+
+def find_rain_result_candidate_crops(screenshot):
+    image_rgb = np.array(screenshot.convert("RGB"))
+    hsv = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2HSV)
+
+    yellow_mask = cv2.inRange(
+        hsv,
+        np.array([14, 80, 90], dtype=np.uint8),
+        np.array([45, 255, 255], dtype=np.uint8),
+    )
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    yellow_mask = cv2.morphologyEx(yellow_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+    yellow_mask = cv2.dilate(yellow_mask, kernel, iterations=1)
+
+    contours, _ = cv2.findContours(yellow_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    candidates = []
+    screen_width, screen_height = screenshot.size
+
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if w < RAIN_RESULT_MIN_BOX_WIDTH or h < RAIN_RESULT_MIN_BOX_HEIGHT:
+            continue
+
+        aspect = w / max(h, 1)
+        if aspect < 1.4 or aspect > 6.5:
+            continue
+
+        left = max(0, x - 8)
+        top = max(0, y - 8)
+        right = min(screen_width, x + w + 8)
+        bottom = min(screen_height, y + h + 8)
+        candidates.append(
+            {
+                "crop": screenshot.crop((left, top, right, bottom)),
+                "area": w * h,
+            }
+        )
+
+    candidates.sort(key=lambda item: item["area"], reverse=True)
+    return [item["crop"] for item in candidates[:4]]
 
 
 async def ocr_image_with_windows(image):
@@ -546,6 +618,29 @@ def read_rain_reward_amount_from_screen():
 def read_rain_result_from_screen():
     try:
         screenshot = capture_all_monitors_image()
+    except (ImportError, ModuleNotFoundError):
+        return None, "Windows OCR packages are not installed"
+    except Exception as e:
+        return None, f"Screenshot failed: {e.__class__.__name__}"
+
+    result_box_detail = None
+    for crop in find_rain_result_candidate_crops(screenshot):
+        try:
+            text = asyncio.run(ocr_image_with_windows(crop))
+        except (ImportError, ModuleNotFoundError):
+            return None, "Windows OCR packages are not installed"
+        except Exception:
+            continue
+
+        result = parse_rain_result_summary(text)
+        if result is not None:
+            return result, "Read rain result yellow box"
+        result_box_detail = (
+            "Rain result yellow box found but summary was not parsed "
+            f"(OCR saw: {compact_ocr_preview(text)})"
+        )
+
+    try:
         text = asyncio.run(ocr_image_with_windows(screenshot))
     except (ImportError, ModuleNotFoundError):
         return None, "Windows OCR packages are not installed"
@@ -556,11 +651,10 @@ def read_rain_result_from_screen():
     if result is not None:
         return result, "Read rain result summary"
 
-    return (
-        None,
-        "Rain result summary not visible "
-        f"(OCR saw: {compact_ocr_preview(text)})",
-    )
+    if result_box_detail:
+        return None, result_box_detail
+
+    return None, "Rain result summary not visible " f"(OCR saw: {compact_ocr_preview(text)})"
 
 
 def parse_battle_discount(text):
@@ -3860,15 +3954,18 @@ try {{
                     lambda s=state, d=detail, k=rain_notification_key: self.report_weather_station_result(s, d, k),
                 )
 
-                delay = clamp_int_setting(
-                    self.get_setting_value(
-                        self.weather_station_interval,
+                if state is True:
+                    delay = WEATHER_RAIN_FOUND_COOLDOWN_SECONDS
+                else:
+                    delay = clamp_int_setting(
+                        self.get_setting_value(
+                            self.weather_station_interval,
+                            DEFAULT_WEATHER_STATION_INTERVAL,
+                        ),
                         DEFAULT_WEATHER_STATION_INTERVAL,
-                    ),
-                    DEFAULT_WEATHER_STATION_INTERVAL,
-                    10,
-                    90,
-                )
+                        10,
+                        90,
+                    )
                 self.sleep_with_check_timer(
                     "weather_station_next_check_at",
                     delay,
@@ -4698,9 +4795,10 @@ try {{
 
                     self.sleep_with_check_timer(
                         "rain_collector_next_check_at",
-                        2,
+                        RAIN_FOUND_COOLDOWN_SECONDS,
                         should_continue=lambda: self.running,
                     )
+                    continue
                 else:
                     self.chance_skipped_rain_target = None
                     if self.rain_scan_found_last_check is not False:
