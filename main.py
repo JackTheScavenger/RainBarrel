@@ -42,7 +42,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.13"
+APP_VERSION = "1.1.14"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIDENCE_PERCENT = 65
@@ -108,13 +108,15 @@ RAIN_FOUND_COOLDOWN_SECONDS = 3 * 60
 WEATHER_RAIN_FOUND_COOLDOWN_SECONDS = 3 * 60
 RAIN_REWARD_SCAN_INTERVAL_SECONDS = 1
 RAIN_RESULT_SCAN_INTERVAL_SECONDS = 1
+RAIN_RESULT_FULL_SCREEN_OCR_EVERY = 8
 RAIN_TIP_SCAN_INTERVAL_SECONDS = 1
 RAIN_TIP_MISSES_AFTER_FOUND_TO_STOP = 3
 RAIN_TIP_READING_CONFIRMATIONS = 2
 RAIN_TIP_LARGE_JUMP_CONFIRMATIONS = 4
 RAIN_TIP_DROP_CONFIRMATIONS = 5
-RAIN_TIP_LARGE_JUMP_MIN_SCRAP = 25.0
-RAIN_TIP_LARGE_JUMP_RATIO = 0.15
+RAIN_TIP_LARGE_JUMP_MIN_SCRAP = 8.0
+RAIN_TIP_LARGE_JUMP_RATIO = 0.35
+RAIN_TIP_RECENT_WINDOW = 6
 RAIN_TIP_HISTORY_RECLAIM_CONFIRMATIONS = 2
 RAIN_TIP_HISTORY_RECLAIM_MARGIN = 3
 RAIN_TIP_FINAL_MIN_READS = 2
@@ -140,6 +142,8 @@ BATTLE_CLICK_OFFSET_X = 260
 BATTLE_CLICK_OFFSET_Y = 0
 WEATHER_RAIN_MAX_ACTIVE_SECONDS = 10 * 60
 SCROLL_WHEEL_SPEED_MULTIPLIER = 3
+
+OCR_LOCK = threading.Lock()
 
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0
@@ -667,6 +671,13 @@ def choose_final_rain_tip_cents(read_counts, fallback_cents=None, read_last_seen
                 return fallback_cents, False
         return top_cents, True
 
+    if fallback_cents is not None and read_last_seen is not None:
+        fallback_count = read_counts.get(fallback_cents, 0)
+        if fallback_count >= RAIN_TIP_READING_CONFIRMATIONS:
+            latest_seen = max(read_last_seen.values(), default=-1)
+            if read_last_seen.get(fallback_cents, -1) == latest_seen:
+                return fallback_cents, True
+
     return fallback_cents, False
 
 
@@ -752,6 +763,11 @@ async def ocr_image_with_windows(image):
     return result.text or ""
 
 
+def run_windows_ocr(image):
+    with OCR_LOCK:
+        return asyncio.run(ocr_image_with_windows(image))
+
+
 def read_rain_reward_amount_from_screen():
     try:
         screenshot = capture_all_monitors_image()
@@ -767,7 +783,7 @@ def read_rain_reward_amount_from_screen():
         return None, f"Reward popup image not found (best match={popup_score:.2f})"
 
     try:
-        text = asyncio.run(ocr_image_with_windows(reward_crop))
+        text = run_windows_ocr(reward_crop)
     except (ImportError, ModuleNotFoundError):
         return None, "Windows OCR packages are not installed"
     except Exception as e:
@@ -802,7 +818,7 @@ def read_rain_tip_amount_from_screen():
     previews = []
     for ocr_image in build_rain_tip_ocr_images(joined_crop):
         try:
-            text = asyncio.run(ocr_image_with_windows(ocr_image))
+            text = run_windows_ocr(ocr_image)
         except (ImportError, ModuleNotFoundError):
             return None, "Windows OCR packages are not installed"
         except Exception as e:
@@ -824,7 +840,7 @@ def read_rain_tip_amount_from_screen():
     return amount, f"Read rain tip amount: {amount:.2f} scrap"
 
 
-def read_rain_result_from_screen():
+def read_rain_result_from_screen(allow_full_screen_ocr=True):
     try:
         screenshot = capture_all_monitors_image()
     except (ImportError, ModuleNotFoundError):
@@ -835,7 +851,7 @@ def read_rain_result_from_screen():
     result_box_detail = None
     for crop in find_rain_result_candidate_crops(screenshot):
         try:
-            text = asyncio.run(ocr_image_with_windows(crop))
+            text = run_windows_ocr(crop)
         except (ImportError, ModuleNotFoundError):
             return None, "Windows OCR packages are not installed"
         except Exception:
@@ -849,21 +865,26 @@ def read_rain_result_from_screen():
             f"(OCR saw: {compact_ocr_preview(text)})"
         )
 
-    try:
-        text = asyncio.run(ocr_image_with_windows(screenshot))
-    except (ImportError, ModuleNotFoundError):
-        return None, "Windows OCR packages are not installed"
-    except Exception as e:
-        return None, f"Rain result OCR failed: {e.__class__.__name__}"
+    if allow_full_screen_ocr:
+        try:
+            text = run_windows_ocr(screenshot)
+        except (ImportError, ModuleNotFoundError):
+            return None, "Windows OCR packages are not installed"
+        except Exception as e:
+            return None, f"Rain result OCR failed: {e.__class__.__name__}"
 
-    result = parse_rain_result_summary(text)
-    if result is not None:
-        return result, "Read rain result summary"
+        result = parse_rain_result_summary(text)
+        if result is not None:
+            return result, "Read rain result summary"
+    else:
+        text = ""
 
     if result_box_detail:
         return None, result_box_detail
 
-    return None, "Rain result summary not visible " f"(OCR saw: {compact_ocr_preview(text)})"
+    if allow_full_screen_ocr:
+        return None, "Rain result summary not visible " f"(OCR saw: {compact_ocr_preview(text)})"
+    return None, "Rain result yellow box not visible"
 
 
 def parse_battle_discount(text):
@@ -893,7 +914,7 @@ def read_battle_discount_from_screen(screenshot, match, monitor):
 
     try:
         crop = screenshot.crop(relative_box)
-        text = asyncio.run(ocr_image_with_windows(crop))
+        text = run_windows_ocr(crop)
     except (ImportError, ModuleNotFoundError):
         return None, "Windows OCR packages are not installed"
     except Exception as e:
@@ -1576,6 +1597,7 @@ class App(ctk.CTk):
         self.pending_rain_tracking_recorded = False
         self.rain_tracking_source = None
         self.rain_tracking_started_at = None
+        self.rain_tracking_watch_until = None
         self.current_session_seconds = 0.0
         self.current_session_rains_clicked = 0
         self.current_session_rain_collected = 0.0
@@ -3150,7 +3172,13 @@ try {{
         self.last_action = f"Rain detected by {source}"
         self.save_stats()
 
+    def get_rain_tracking_watch_until(self):
+        with self.rain_tracking_lock:
+            return self.rain_tracking_watch_until or 0.0
+
     def start_rain_trackers(self, source="rain tracker"):
+        now = time.time()
+        watch_until = now + RAIN_TRACKER_WATCH_SECONDS
         with self.rain_reward_lock:
             already_running = (
                 self.rain_tip_tracker_active
@@ -3160,7 +3188,21 @@ try {{
             existing_source = self.rain_tracking_source or "another source"
 
         if already_running:
-            self.log(f"Rain trackers already running from {existing_source}; {source} trigger ignored")
+            with self.rain_tracking_lock:
+                previous_watch_until = self.rain_tracking_watch_until or 0.0
+                self.rain_tracking_watch_until = max(previous_watch_until, watch_until)
+                if self.rain_tracking_source and source not in self.rain_tracking_source:
+                    self.rain_tracking_source = f"{self.rain_tracking_source} + {source}"
+            extended_by = max(0, int(self.rain_tracking_watch_until - previous_watch_until))
+            if extended_by > 0:
+                remaining = max(0, int(self.rain_tracking_watch_until - time.time()))
+                self.log(
+                    f"Rain trackers already running from {existing_source}; "
+                    f"{source} extended tracking by {extended_by}s "
+                    f"(watching {remaining}s more)"
+                )
+            else:
+                self.log(f"Rain trackers already running from {existing_source}; {source} trigger reused")
             return False
 
         with self.rain_tracking_lock:
@@ -3171,7 +3213,8 @@ try {{
             self.pending_rain_total_tipped_at = None
             self.pending_rain_total_tipped_verified = False
             self.rain_tracking_source = source
-            self.rain_tracking_started_at = time.time()
+            self.rain_tracking_started_at = now
+            self.rain_tracking_watch_until = watch_until
 
         with self.rain_reward_lock:
             self.rain_tip_tracker_run_id += 1
@@ -3188,7 +3231,7 @@ try {{
             self.rain_reward_timer_status = ""
             self.rain_result_timer_status = ""
 
-        self.log(f"Rain trackers started by {source}")
+        self.log(f"Rain trackers started by {source}; watching for {RAIN_TRACKER_WATCH_SECONDS}s")
         self.log("Rain tip tracker started")
         self.log("Rain reward tracker started")
         self.log("Rain result tracker started")
@@ -3228,7 +3271,6 @@ try {{
         )
 
     def rain_tip_tracker_worker(self, run_id):
-        deadline = time.time() + RAIN_TIP_WATCH_SECONDS
         last_detail = None
         last_tipped = None
         last_tipped_verified = False
@@ -3236,12 +3278,13 @@ try {{
         candidate_count = 0
         read_counts = {}
         read_last_seen = {}
+        recent_reads = []
         read_index = 0
         misses_after_found = 0
         tip_parse_warning_logged = False
 
         try:
-            while time.time() < deadline and run_id == self.rain_tip_tracker_run_id:
+            while time.time() < self.get_rain_tracking_watch_until() and run_id == self.rain_tip_tracker_run_id:
                 amount, detail = read_rain_tip_amount_from_screen()
                 if (
                     amount is None
@@ -3257,6 +3300,8 @@ try {{
                     read_index += 1
                     read_counts[tipped_cents] = read_counts.get(tipped_cents, 0) + 1
                     read_last_seen[tipped_cents] = read_index
+                    recent_reads.append(tipped_cents)
+                    recent_reads = recent_reads[-RAIN_TIP_RECENT_WINDOW:]
                     if candidate_tipped == tipped:
                         candidate_count += 1
                     else:
@@ -3282,8 +3327,11 @@ try {{
                             and tipped_seen >= last_seen + RAIN_TIP_HISTORY_RECLAIM_MARGIN
                         )
 
+                    recent_count = recent_reads.count(tipped_cents)
+                    recent_can_confirm = recent_count >= confirmations_needed
+
                     if tipped != last_tipped and candidate_count < confirmations_needed:
-                        if not history_can_reclaim:
+                        if not history_can_reclaim and not recent_can_confirm:
                             last_detail = f"Confirming rain tipped amount: {self.format_rain_amount(tipped)} scrap"
                             time.sleep(RAIN_TIP_SCAN_INTERVAL_SECONDS)
                             continue
@@ -3343,12 +3391,11 @@ try {{
             self.maybe_record_pending_rain_result()
 
     def rain_reward_tracker_worker(self, run_id):
-        deadline = time.time() + RAIN_REWARD_WATCH_SECONDS
         last_detail = None
         reward_parse_warning_logged = False
 
         try:
-            while time.time() < deadline and run_id == self.rain_reward_tracker_run_id:
+            while time.time() < self.get_rain_tracking_watch_until() and run_id == self.rain_reward_tracker_run_id:
                 self.rain_reward_next_check_at = time.time()
                 self.rain_reward_timer_status = ""
 
@@ -3365,6 +3412,7 @@ try {{
                     own_reward = round(float(amount), 2)
                     self.rain_reward_next_check_at = None
                     self.rain_reward_timer_status = "Reward found"
+                    self.log(detail)
                     with self.rain_tracking_lock:
                         self.pending_rain_tracking_reward = own_reward
                     self.after(0, lambda value=own_reward: self.record_rain_reward(value))
@@ -3385,21 +3433,24 @@ try {{
                     self.rain_reward_timer_status = "Off"
 
     def rain_result_tracker_worker(self, run_id):
-        deadline = time.time() + RAIN_RESULT_WATCH_SECONDS
         last_detail = None
+        scan_count = 0
 
         try:
-            while time.time() < deadline and run_id == self.rain_result_tracker_run_id:
+            while time.time() < self.get_rain_tracking_watch_until() and run_id == self.rain_result_tracker_run_id:
                 self.rain_result_next_check_at = time.time()
                 self.rain_result_timer_status = ""
 
-                result, detail = read_rain_result_from_screen()
+                scan_count += 1
+                result, detail = read_rain_result_from_screen(
+                    allow_full_screen_ocr=scan_count % RAIN_RESULT_FULL_SCREEN_OCR_EVERY == 0
+                )
                 if result is not None:
                     with self.rain_tracking_lock:
                         self.pending_rain_tracking_result = result
                     self.rain_result_next_check_at = None
                     self.rain_result_timer_status = "Result found"
-                    self.log("Rain result summary found")
+                    self.log(f"Rain result summary found: {detail}")
                     self.maybe_record_pending_rain_result()
                     return
 
@@ -3521,6 +3572,7 @@ try {{
         self.rain_result_tracker_active = False
         self.rain_reward_tracker_run_id += 1
         self.rain_result_tracker_run_id += 1
+        self.rain_tracking_watch_until = None
         self.rain_collector_next_check_at = None
         self.weather_station_next_check_at = None
         self.rain_reward_next_check_at = None
