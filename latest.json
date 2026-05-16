@@ -1,6 +1,6 @@
 {
-  "version": "1.1.5",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.5/RainBarrel.exe",
-  "sha256": "50441c30972bb5191e17644c2a3fc950d5e0394cb36e3f092d8042e6dd2d8440",
-  "notes": "Fixed rain reward tracking after clicks so each rain click starts a fresh reward tracker and reads more OCR reward formats."
+  "version": "1.1.6",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.6/RainBarrel.exe",
+  "sha256": "c6bfb6fd7bedf6353b3beefe550e67e056ec98793c0762a69b62ababe532f8fe",
+  "notes": "Updated rain clicker log messages to say exactly what was found, clicked, or missing."
 }
