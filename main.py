@@ -42,7 +42,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.8"
+APP_VERSION = "1.1.9"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIDENCE_PERCENT = 65
@@ -103,7 +103,8 @@ RAIN_REWARD_WATCH_SECONDS = 3 * 60
 RAIN_RESULT_WATCH_SECONDS = 3 * 60
 RAIN_REWARD_SCAN_INTERVAL_SECONDS = 1
 RAIN_RESULT_SCAN_INTERVAL_SECONDS = 1
-RAIN_REWARD_POPUP_CONFIDENCE = 0.7
+RAIN_REWARD_POPUP_CONFIDENCE = 0.55
+RAIN_REWARD_POPUP_TEMPLATE_SCALES = (0.75, 0.85, 0.95, 1.0, 1.1, 1.25, 1.4, 1.6)
 RAIN_REWARD_POPUP_CROP_WIDTH = 520
 RAIN_REWARD_POPUP_CROP_HEIGHT = 180
 OCR_PREVIEW_LIMIT = 140
@@ -413,43 +414,60 @@ def compact_ocr_preview(text, limit=OCR_PREVIEW_LIMIT):
     return preview
 
 
-def locate_image_in_pil(image, image_path, confidence=0.7):
+def locate_image_in_pil(image, image_path, confidence=0.7, scales=(1.0,)):
     if not os.path.exists(image_path):
-        return None
+        return None, None
 
     target = cv2.imread(image_path, cv2.IMREAD_COLOR)
     if target is None:
-        return None
+        return None, None
 
     screen_rgb = np.array(image.convert("RGB"))
-    screen_bgr = cv2.cvtColor(screen_rgb, cv2.COLOR_RGB2BGR)
-    target_h, target_w = target.shape[:2]
-    screen_h, screen_w = screen_bgr.shape[:2]
-    if target_w > screen_w or target_h > screen_h:
-        return None
+    screen_gray = cv2.cvtColor(screen_rgb, cv2.COLOR_RGB2GRAY)
+    target_gray = cv2.cvtColor(target, cv2.COLOR_BGR2GRAY)
+    screen_h, screen_w = screen_gray.shape[:2]
+    best = None
+    best_score = 0.0
 
-    result = cv2.matchTemplate(screen_bgr, target, cv2.TM_CCOEFF_NORMED)
-    _, max_val, _, max_loc = cv2.minMaxLoc(result)
-    if max_val < confidence:
-        return None
+    for scale in scales:
+        target_w = max(1, int(target_gray.shape[1] * scale))
+        target_h = max(1, int(target_gray.shape[0] * scale))
+        if target_w > screen_w or target_h > screen_h:
+            continue
 
-    return {
-        "left": int(max_loc[0]),
-        "top": int(max_loc[1]),
-        "width": int(target_w),
-        "height": int(target_h),
-        "score": float(max_val),
-    }
+        scaled_target = cv2.resize(
+            target_gray,
+            (target_w, target_h),
+            interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC,
+        )
+        result = cv2.matchTemplate(screen_gray, scaled_target, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+        if max_val > best_score:
+            best_score = float(max_val)
+            best = {
+                "left": int(max_loc[0]),
+                "top": int(max_loc[1]),
+                "width": int(target_w),
+                "height": int(target_h),
+                "score": float(max_val),
+                "scale": float(scale),
+            }
+
+    if best is None or best_score < confidence:
+        return None, best_score
+
+    return best, best_score
 
 
 def crop_rain_reward_popup(screenshot):
-    match = locate_image_in_pil(
+    match, best_score = locate_image_in_pil(
         screenshot,
         RAIN_REWARD_IMAGE_PATH,
         confidence=RAIN_REWARD_POPUP_CONFIDENCE,
+        scales=RAIN_REWARD_POPUP_TEMPLATE_SCALES,
     )
     if not match:
-        return None, None
+        return None, best_score
 
     left = max(0, match["left"] - 12)
     top = max(0, match["top"] - 12)
@@ -503,7 +521,9 @@ def read_rain_reward_amount_from_screen():
 
     reward_crop, popup_score = crop_rain_reward_popup(screenshot)
     if reward_crop is None:
-        return None, "Reward popup image not found"
+        if popup_score is None:
+            return None, "Reward popup image not found"
+        return None, f"Reward popup image not found (best match={popup_score:.2f})"
 
     try:
         text = asyncio.run(ocr_image_with_windows(reward_crop))

@@ -17,7 +17,21 @@ def keep_runtime_module(name):
 
 
 hiddenimports = (
-    ['tkinter', 'tkinter.ttk', 'tkinter.font', 'tkinter.filedialog', 'tkinter.constants', '_tkinter']
+    [
+        'tkinter',
+        'tkinter.ttk',
+        'tkinter.font',
+        'tkinter.filedialog',
+        'tkinter.constants',
+        '_tkinter',
+        'winrt.windows.foundation',
+        'winrt.windows.foundation.collections',
+        'winrt.windows.globalization',
+        'winrt.windows.graphics.imaging',
+        'winrt.windows.media.ocr',
+        'winrt.windows.storage.streams',
+    ]
+    + collect_submodules('winrt', filter=keep_runtime_module)
     +
     collect_submodules('selenium', filter=keep_runtime_module)
     + collect_submodules('selenium.webdriver.common.devtools', filter=keep_runtime_module)
