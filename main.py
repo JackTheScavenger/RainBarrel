@@ -26,7 +26,7 @@ import mss
 import numpy as np
 import pyautogui
 import customtkinter as ctk
-from PIL import Image, ImageTk, ImageDraw, ImageFilter
+from PIL import Image, ImageTk, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 
 # ================= TO-DO =================
 # Rain page animations
@@ -42,7 +42,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageFilter
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.11"
+APP_VERSION = "1.1.12"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIDENCE_PERCENT = 65
@@ -109,6 +109,15 @@ RAIN_REWARD_SCAN_INTERVAL_SECONDS = 1
 RAIN_RESULT_SCAN_INTERVAL_SECONDS = 1
 RAIN_TIP_SCAN_INTERVAL_SECONDS = 1
 RAIN_TIP_MISSES_AFTER_FOUND_TO_STOP = 3
+RAIN_TIP_READING_CONFIRMATIONS = 2
+RAIN_TIP_LARGE_JUMP_CONFIRMATIONS = 4
+RAIN_TIP_DROP_CONFIRMATIONS = 5
+RAIN_TIP_LARGE_JUMP_MIN_SCRAP = 25.0
+RAIN_TIP_LARGE_JUMP_RATIO = 0.15
+RAIN_TIP_HISTORY_RECLAIM_CONFIRMATIONS = 2
+RAIN_TIP_HISTORY_RECLAIM_MARGIN = 3
+RAIN_TIP_FINAL_MIN_READS = 2
+RAIN_TIP_FINAL_CLEAR_MARGIN = 2
 RAIN_REWARD_POPUP_CONFIDENCE = 0.55
 RAIN_REWARD_POPUP_TEMPLATE_SCALES = (0.75, 0.85, 0.95, 1.0, 1.1, 1.25, 1.4, 1.6)
 RAIN_REWARD_TEMPLATE_IGNORE_RECTS = ((0.31, 0.45, 0.99, 0.95),)
@@ -119,6 +128,7 @@ RAIN_JOINED_BOX_TEMPLATE_SCALES = (0.75, 0.85, 0.95, 1.0, 1.1, 1.25, 1.4, 1.6)
 RAIN_JOINED_BOX_TEMPLATE_IGNORE_RECTS = ((0.44, 0.14, 0.68, 0.56),)
 RAIN_JOINED_BOX_CROP_WIDTH = 620
 RAIN_JOINED_BOX_CROP_HEIGHT = 280
+RAIN_JOINED_TIP_LINE_RECTS = ((0.03, 0.30, 0.96, 0.68), (0.03, 0.42, 0.96, 0.66))
 RAIN_RESULT_MIN_BOX_WIDTH = 180
 RAIN_RESULT_MIN_BOX_HEIGHT = 60
 OCR_PREVIEW_LIMIT = 140
@@ -355,15 +365,41 @@ def parse_scrap_number(value):
         return None
 
 
+def parse_ocr_scrap_number(value):
+    if value is None:
+        return None
+
+    normalized = str(value)
+    normalized = normalized.translate(str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "|": "1"}))
+    normalized = re.sub(r"\s+", "", normalized)
+    normalized = normalized.replace(",", ".")
+    normalized = re.sub(r"[^0-9.]", "", normalized)
+    if normalized.count(".") > 1:
+        first_dot = normalized.find(".")
+        normalized = normalized[: first_dot + 1] + normalized[first_dot + 1 :].replace(".", "")
+
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)", normalized)
+    if not match:
+        return None
+
+    try:
+        token = match.group(1)
+        if "." not in token and len(token) >= 4:
+            return round(float(token) / 100, 2)
+        return round(float(token), 2)
+    except ValueError:
+        return None
+
+
 def parse_rain_tip_amount(text):
     patterns = [
-        r"([0-9]+(?:[.,][0-9]+)?)\s+from\s+rain\s+tips?\b",
-        r"([0-9]+(?:[.,][0-9]+)?)\s+from\s+rain\b",
+        r"([0-9OIl|]+(?:[\s.,][0-9OIl|]+)?)\s+from\s+rain\s+tips?\b",
+        r"([0-9OIl|]+(?:[\s.,][0-9OIl|]+)?)\s+from\s+rain\b",
     ]
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            return parse_scrap_number(match.group(1))
+            return parse_ocr_scrap_number(match.group(1))
     return None
 
 
@@ -557,6 +593,93 @@ def crop_rain_joined_box(screenshot):
     return crop, match["score"]
 
 
+def crop_image_by_ratio(image, rect):
+    left_ratio, top_ratio, right_ratio, bottom_ratio = rect
+    left = min(max(0, int(image.width * left_ratio)), image.width)
+    top = min(max(0, int(image.height * top_ratio)), image.height)
+    right = min(max(left + 1, int(image.width * right_ratio)), image.width)
+    bottom = min(max(top + 1, int(image.height * bottom_ratio)), image.height)
+    return image.crop((left, top, right, bottom))
+
+
+def prepare_tip_ocr_variant(image):
+    gray = ImageOps.grayscale(image)
+    gray = ImageEnhance.Contrast(gray).enhance(2.4)
+    gray = ImageEnhance.Sharpness(gray).enhance(1.8)
+    gray = gray.filter(ImageFilter.MedianFilter(size=3))
+    threshold = 150
+    return gray.point(lambda pixel: 255 if pixel >= threshold else 0, mode="1").convert("RGB")
+
+
+def build_rain_tip_ocr_images(joined_crop):
+    images = [joined_crop]
+    for rect in RAIN_JOINED_TIP_LINE_RECTS:
+        line_crop = crop_image_by_ratio(joined_crop, rect)
+        if line_crop.width < 900:
+            line_crop = line_crop.resize((line_crop.width * 2, line_crop.height * 2), Image.LANCZOS)
+        images.append(line_crop)
+        images.append(prepare_tip_ocr_variant(line_crop))
+    return images
+
+
+def rain_tip_cents(amount):
+    return int(round(float(amount) * 100))
+
+
+def rain_tip_amount_from_cents(cents):
+    return round(int(cents) / 100, 2)
+
+
+def choose_rain_tip_amount(candidates):
+    if not candidates:
+        return None
+
+    cents_counts = {}
+    for candidate in candidates:
+        cents = rain_tip_cents(candidate)
+        cents_counts[cents] = cents_counts.get(cents, 0) + 1
+
+    confirmed = [(cents, count) for cents, count in cents_counts.items() if count >= 2]
+    if confirmed:
+        confirmed.sort(key=lambda item: item[1], reverse=True)
+        if len(confirmed) == 1 or confirmed[0][1] > confirmed[1][1]:
+            return rain_tip_amount_from_cents(confirmed[0][0])
+        return None
+
+    if len(cents_counts) == 1:
+        return rain_tip_amount_from_cents(next(iter(cents_counts)))
+
+    return None
+
+
+def choose_final_rain_tip_cents(read_counts, fallback_cents=None, read_last_seen=None):
+    if not read_counts:
+        return fallback_cents, fallback_cents is not None
+
+    ranked = sorted(read_counts.items(), key=lambda item: item[1], reverse=True)
+    top_cents, top_count = ranked[0]
+    runner_count = ranked[1][1] if len(ranked) > 1 else 0
+
+    if top_count >= RAIN_TIP_FINAL_MIN_READS and top_count >= runner_count + RAIN_TIP_FINAL_CLEAR_MARGIN:
+        if fallback_cents is not None and top_cents != fallback_cents and read_last_seen is not None:
+            if read_last_seen.get(top_cents, -1) < read_last_seen.get(fallback_cents, -1):
+                return fallback_cents, False
+        return top_cents, True
+
+    return fallback_cents, False
+
+
+def format_rain_tip_read_counts(read_counts, limit=4):
+    if not read_counts:
+        return "no reads"
+
+    ranked = sorted(read_counts.items(), key=lambda item: item[1], reverse=True)
+    return ", ".join(
+        f"{rain_tip_amount_from_cents(cents):.2f}x{count}"
+        for cents, count in ranked[:limit]
+    )
+
+
 def find_rain_result_candidate_crops(screenshot):
     image_rgb = np.array(screenshot.convert("RGB"))
     hsv = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2HSV)
@@ -674,19 +797,27 @@ def read_rain_tip_amount_from_screen():
             return None, "Rain joined box image not found"
         return None, f"Rain joined box image not found (best match={box_score:.2f})"
 
-    try:
-        text = asyncio.run(ocr_image_with_windows(joined_crop))
-    except (ImportError, ModuleNotFoundError):
-        return None, "Windows OCR packages are not installed"
-    except Exception as e:
-        return None, f"Rain joined box OCR failed: {e.__class__.__name__}"
+    candidates = []
+    previews = []
+    for ocr_image in build_rain_tip_ocr_images(joined_crop):
+        try:
+            text = asyncio.run(ocr_image_with_windows(ocr_image))
+        except (ImportError, ModuleNotFoundError):
+            return None, "Windows OCR packages are not installed"
+        except Exception as e:
+            return None, f"Rain joined box OCR failed: {e.__class__.__name__}"
 
-    amount = parse_rain_tip_amount(text)
+        previews.append(compact_ocr_preview(text, 80))
+        amount = parse_rain_tip_amount(text)
+        if amount is not None:
+            candidates.append(amount)
+
+    amount = choose_rain_tip_amount(candidates)
     if amount is None:
         return (
             None,
             "Rain joined box found but tip amount was not parsed "
-            f"(match={box_score:.2f}, OCR saw: {compact_ocr_preview(text)})",
+            f"(match={box_score:.2f}, OCR saw: {' | '.join(previews)})",
         )
 
     return amount, f"Read rain tip amount: {amount:.2f} scrap"
@@ -1465,6 +1596,7 @@ class App(ctk.CTk):
         self.chance_skipped_rain_target = None
         self.pending_rain_total_tipped = None
         self.pending_rain_total_tipped_at = None
+        self.pending_rain_total_tipped_verified = False
         self.rain_tip_tracker_active = False
         self.rain_tip_tracker_run_id = 0
         self.rain_log_entries = []
@@ -2120,12 +2252,14 @@ try {{
                 continue
 
             total_tipped = parse_scrap_number(item.get("total_tipped"))
+            total_tipped_verified = bool(item.get("total_tipped_verified", total_tipped is not None))
             cleaned.append(
                 {
                     "time": timestamp,
                     "people_joined": people_joined,
                     "total_scrap_claimed": total_scrap_claimed,
                     "total_tipped": total_tipped,
+                    "total_tipped_verified": total_tipped_verified,
                     "your_reward": your_reward,
                 }
             )
@@ -3020,6 +3154,7 @@ try {{
             self.pending_rain_tracking_recorded = False
             self.pending_rain_total_tipped = None
             self.pending_rain_total_tipped_at = None
+            self.pending_rain_total_tipped_verified = False
 
         with self.rain_reward_lock:
             self.rain_tip_tracker_run_id += 1
@@ -3077,6 +3212,12 @@ try {{
         deadline = time.time() + RAIN_TIP_WATCH_SECONDS
         last_detail = None
         last_tipped = None
+        last_tipped_verified = False
+        candidate_tipped = None
+        candidate_count = 0
+        read_counts = {}
+        read_last_seen = {}
+        read_index = 0
         misses_after_found = 0
         tip_parse_warning_logged = False
 
@@ -3093,10 +3234,46 @@ try {{
 
                 if amount is not None:
                     tipped = round(float(amount), 2)
+                    tipped_cents = rain_tip_cents(tipped)
+                    read_index += 1
+                    read_counts[tipped_cents] = read_counts.get(tipped_cents, 0) + 1
+                    read_last_seen[tipped_cents] = read_index
+                    if candidate_tipped == tipped:
+                        candidate_count += 1
+                    else:
+                        candidate_tipped = tipped
+                        candidate_count = 1
+                    confirmations_needed = RAIN_TIP_READING_CONFIRMATIONS
+                    if last_tipped is not None:
+                        if tipped < last_tipped:
+                            confirmations_needed = RAIN_TIP_DROP_CONFIRMATIONS
+                        elif tipped > last_tipped:
+                            jump = tipped - last_tipped
+                            jump_ratio = jump / max(last_tipped, 1.0)
+                            if jump >= RAIN_TIP_LARGE_JUMP_MIN_SCRAP or jump_ratio >= RAIN_TIP_LARGE_JUMP_RATIO:
+                                confirmations_needed = RAIN_TIP_LARGE_JUMP_CONFIRMATIONS
+
+                    history_can_reclaim = False
+                    if last_tipped is not None and tipped != last_tipped:
+                        last_cents = rain_tip_cents(last_tipped)
+                        tipped_seen = read_counts.get(tipped_cents, 0)
+                        last_seen = read_counts.get(last_cents, 0)
+                        history_can_reclaim = (
+                            candidate_count >= RAIN_TIP_HISTORY_RECLAIM_CONFIRMATIONS
+                            and tipped_seen >= last_seen + RAIN_TIP_HISTORY_RECLAIM_MARGIN
+                        )
+
+                    if tipped != last_tipped and candidate_count < confirmations_needed:
+                        if not history_can_reclaim:
+                            last_detail = f"Confirming rain tipped amount: {self.format_rain_amount(tipped)} scrap"
+                            time.sleep(RAIN_TIP_SCAN_INTERVAL_SECONDS)
+                            continue
                     misses_after_found = 0
+                    last_tipped_verified = True
                     with self.rain_tracking_lock:
                         self.pending_rain_total_tipped = tipped
                         self.pending_rain_total_tipped_at = time.time()
+                        self.pending_rain_total_tipped_verified = True
                     if last_tipped is None:
                         self.log(f"Tracked rain tipped amount: {self.format_rain_amount(tipped)} scrap")
                     elif tipped != last_tipped:
@@ -3118,8 +3295,26 @@ try {{
                 last_detail = detail
                 time.sleep(RAIN_TIP_SCAN_INTERVAL_SECONDS)
 
+            final_cents, final_verified = choose_final_rain_tip_cents(
+                read_counts,
+                rain_tip_cents(last_tipped) if last_tipped is not None else None,
+                read_last_seen,
+            )
+            if final_cents is not None:
+                final_tipped = rain_tip_amount_from_cents(final_cents)
+                with self.rain_tracking_lock:
+                    self.pending_rain_total_tipped = final_tipped
+                    self.pending_rain_total_tipped_at = time.time()
+                    self.pending_rain_total_tipped_verified = bool(final_verified)
+                if last_tipped is None or final_tipped != last_tipped:
+                    self.log(f"Final rain tipped consensus: {self.format_rain_amount(final_tipped)} scrap")
+                last_tipped = final_tipped
+                last_tipped_verified = bool(final_verified)
+
             if run_id == self.rain_tip_tracker_run_id and last_tipped is not None:
-                self.log(f"Rain tip tracker finished with {self.format_rain_amount(last_tipped)} scrap")
+                suffix = "" if last_tipped_verified else " (unverified)"
+                self.log(f"Rain tip tracker finished with {self.format_rain_amount(last_tipped)} scrap{suffix}")
+                self.log(f"Rain tip read counts: {format_rain_tip_read_counts(read_counts)}")
             elif run_id == self.rain_tip_tracker_run_id and last_detail:
                 self.log(f"Rain tip tracker stopped: {last_detail}")
         finally:
@@ -3228,15 +3423,19 @@ try {{
         with self.rain_tracking_lock:
             pending_total_tipped = self.pending_rain_total_tipped
             pending_total_tipped_at = self.pending_rain_total_tipped_at
+            pending_total_tipped_verified = self.pending_rain_total_tipped_verified
+        total_tipped_verified = total_tipped is not None
         if total_tipped is None and pending_total_tipped is not None:
             if pending_total_tipped_at is None or time.time() - pending_total_tipped_at < RAIN_REWARD_WATCH_SECONDS:
                 total_tipped = pending_total_tipped
+                total_tipped_verified = bool(pending_total_tipped_verified)
 
         item = {
             "time": now.strftime("%Y-%m-%d %H:%M:%S"),
             "people_joined": int(summary["people_joined"]),
             "total_scrap_claimed": round(float(summary["total_scrap_claimed"]), 2),
             "total_tipped": parse_scrap_number(total_tipped),
+            "total_tipped_verified": total_tipped_verified,
             "your_reward": round(float(your_reward), 2),
         }
 
@@ -3247,7 +3446,8 @@ try {{
         self.log(
             "Tracked rain result: "
             f"{item['people_joined']} people | "
-            f"tipped {self.format_optional_rain_amount(item['total_tipped'])} | "
+            f"tipped {self.format_optional_rain_amount(item['total_tipped'])}"
+            f"{'' if item['total_tipped_verified'] else ' (unverified)'} | "
             f"collected {self.format_rain_amount(item['total_scrap_claimed'])} | "
             f"you got {self.format_rain_amount(item['your_reward'])}"
         )
@@ -4074,6 +4274,7 @@ try {{
                                         with self.rain_tracking_lock:
                                             self.pending_rain_total_tipped = parsed_rain_value
                                             self.pending_rain_total_tipped_at = time.time()
+                                            self.pending_rain_total_tipped_verified = True
                                     rain_user_count = payload.get("userCount")
                                     rain_notification_key = f"weather_rain:{started_at}"
                                 elif event_type == "user_count":
