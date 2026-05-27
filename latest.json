@@ -1,6 +1,6 @@
 {
-  "version": "1.1.18",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.18/RainBarrel.exe",
-  "sha256": "b24902751ddbd62e6326f86583de7d762007c62284299d7c29b84dd61a6c562b",
-  "notes": "Improved rain result tracking with more frequent OCR fallback, enlarged yellow-box OCR, more tolerant result parsing, and better miss diagnostics."
+  "version": "1.1.19",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.19/RainBarrel.exe",
+  "sha256": "da4d29393d3f954617d98029a0f5462bc2faecf073e2b1909951c1cec736701a",
+  "notes": "Added trash buttons for rain result log entries, recalculates rain totals after deletion, and improved OCR parsing for other bandit counts."
 }
