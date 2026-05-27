@@ -42,7 +42,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.14"
+APP_VERSION = "1.1.15"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIDENCE_PERCENT = 65
@@ -142,6 +142,8 @@ BATTLE_CLICK_OFFSET_X = 260
 BATTLE_CLICK_OFFSET_Y = 0
 WEATHER_RAIN_MAX_ACTIVE_SECONDS = 10 * 60
 SCROLL_WHEEL_SPEED_MULTIPLIER = 3
+RAIN_TARGET_TEMPLATE_SCALES = (0.80, 0.85, 0.90, 0.95, 1.0, 1.05, 1.10, 1.15, 1.20, 1.30, 1.40, 1.60)
+RAIN_TARGET_MAX_COLOR_DIFF = 45.0
 
 OCR_LOCK = threading.Lock()
 
@@ -171,27 +173,106 @@ ES_DISPLAY_REQUIRED = 0x00000002
 
 # ================= IMAGE DETECTION =================
 
-def locate_image_all_monitors(image_path, confidence=0.65):
+def locate_image_best_all_monitors(
+    image_path,
+    confidence=0.65,
+    scales=(1.0,),
+    grayscale=False,
+    max_color_diff=None,
+):
     target = cv2.imread(image_path, cv2.IMREAD_COLOR)
 
     if target is None:
         raise FileNotFoundError(f"Image not found: {image_path}")
 
+    target_source = cv2.cvtColor(target, cv2.COLOR_BGR2GRAY) if grayscale else target
+    target_h, target_w = target_source.shape[:2]
+
     with mss.mss() as sct:
         monitor = sct.monitors[0]
-        screen = np.array(sct.grab(monitor))
-        screen = cv2.cvtColor(screen, cv2.COLOR_BGRA2BGR)
+        screen_bgr = np.array(sct.grab(monitor))
+        screen_bgr = cv2.cvtColor(screen_bgr, cv2.COLOR_BGRA2BGR)
+        screen = screen_bgr
+        if grayscale:
+            screen = cv2.cvtColor(screen_bgr, cv2.COLOR_BGR2GRAY)
 
-        result = cv2.matchTemplate(screen, target, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+        screen_h, screen_w = screen.shape[:2]
+        best = None
+        best_valid = None
 
-        if max_val >= confidence:
-            h, w = target.shape[:2]
-            x = monitor["left"] + max_loc[0] + w // 2
-            y = monitor["top"] + max_loc[1] + h // 2
-            return x, y, max_val
+        for scale in scales:
+            scaled_w = max(1, int(round(target_w * scale)))
+            scaled_h = max(1, int(round(target_h * scale)))
+            if scaled_w > screen_w or scaled_h > screen_h:
+                continue
+
+            if scale == 1.0:
+                scaled_target = target_source
+            else:
+                interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+                scaled_target = cv2.resize(
+                    target_source,
+                    (scaled_w, scaled_h),
+                    interpolation=interpolation,
+                )
+
+            result = cv2.matchTemplate(screen, scaled_target, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+            color_diff = None
+            if max_color_diff is not None:
+                crop = screen_bgr[
+                    max_loc[1] : max_loc[1] + scaled_h,
+                    max_loc[0] : max_loc[0] + scaled_w,
+                ]
+                scaled_color_target = cv2.resize(
+                    target,
+                    (scaled_w, scaled_h),
+                    interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC,
+                )
+                color_diff = float(
+                    np.abs(crop.astype(np.int16) - scaled_color_target.astype(np.int16)).mean()
+                )
+
+            candidate = {
+                "x": monitor["left"] + max_loc[0] + scaled_w // 2,
+                "y": monitor["top"] + max_loc[1] + scaled_h // 2,
+                "score": float(max_val),
+                "scale": float(scale),
+                "width": int(scaled_w),
+                "height": int(scaled_h),
+                "needed": float(confidence),
+                "color_diff": color_diff,
+            }
+            if best is None or max_val > best["score"]:
+                best = candidate
+
+            color_ok = max_color_diff is None or color_diff is None or color_diff <= max_color_diff
+            if candidate["score"] >= confidence and color_ok:
+                if best_valid is None or candidate["score"] > best_valid["score"]:
+                    best_valid = candidate
+
+        if best_valid is not None:
+            return best_valid, best
+
+    return None, best
+
+
+def locate_image_all_monitors(image_path, confidence=0.65):
+    match, _ = locate_image_best_all_monitors(image_path, confidence=confidence)
+    if match:
+        return match["x"], match["y"], match["score"]
 
     return None
+
+
+def locate_rain_target_all_monitors(confidence=0.65):
+    return locate_image_best_all_monitors(
+        IMAGE_PATH,
+        confidence=confidence,
+        scales=RAIN_TARGET_TEMPLATE_SCALES,
+        grayscale=True,
+        max_color_diff=RAIN_TARGET_MAX_COLOR_DIFF,
+    )
 
 
 def locate_image_matches_all_monitors(image_path, confidence=0.65, max_matches=8):
@@ -5170,14 +5251,21 @@ try {{
         while self.running:
             try:
                 self.rain_collector_next_check_at = time.time()
-                match = locate_image_all_monitors(IMAGE_PATH, self.get_confidence())
+                confidence = self.get_confidence()
+                match, best_match = locate_rain_target_all_monitors(confidence)
 
                 if match:
                     self.rain_scan_found_last_check = True
-                    x, y, score = match
+                    x = match["x"]
+                    y = match["y"]
+                    score = match["score"]
+                    scale = match["scale"]
                     self.record_rain_detected("normal tracker")
 
-                    self.log(f"Found rain target image | X={x} Y={y} confidence={score:.3f}")
+                    self.log(
+                        f"Found rain target image | X={x} Y={y} "
+                        f"confidence={score:.3f} scale={scale:.2f}"
+                    )
 
                     allowed, skip_reason = self.rain_collection_allowed(x, y)
                     if not allowed:
@@ -5230,7 +5318,21 @@ try {{
                 else:
                     self.chance_skipped_rain_target = None
                     if self.rain_scan_found_last_check is not False:
-                        self.log("Rain target image not found")
+                        if best_match:
+                            color_diff = best_match.get("color_diff")
+                            color_detail = (
+                                f", color diff={color_diff:.1f}/{RAIN_TARGET_MAX_COLOR_DIFF:.1f}"
+                                if color_diff is not None
+                                else ""
+                            )
+                            self.log(
+                                "Rain target image not found "
+                                f"(best confidence={best_match['score']:.3f}, "
+                                f"needed={confidence:.3f}, scale={best_match['scale']:.2f}"
+                                f"{color_detail})"
+                            )
+                        else:
+                            self.log("Rain target image not found (no screenshot/template match data)")
                     self.rain_scan_found_last_check = False
 
             except Exception as e:
