@@ -42,7 +42,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.20"
+APP_VERSION = "1.1.21"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIDENCE_PERCENT = 65
@@ -644,6 +644,26 @@ def normalize_rain_result_text(text):
     return normalized[title_match.start() :]
 
 
+def text_looks_like_rain_join_prompt(text):
+    return re.search(
+        r"\b(join\s+rain|join\s+now|rain\s+tips?|based\s+on\s+your\s+play|"
+        r"amount\s*share|requirements?\s+to\s+join|get\s+free\s+scrap)\b",
+        text,
+        re.IGNORECASE,
+    ) is not None
+
+
+def text_has_rain_result_wording(text):
+    if find_rain_result_other_count(text)[0] is not None:
+        return True
+
+    return re.search(
+        r"\b(?:claimed|clalmed|clairned|clamed|daimed)\b",
+        text,
+        re.IGNORECASE,
+    ) is not None
+
+
 def find_rain_result_other_count(text):
     other_pattern = re.compile(
         r"(?:\b(?:and|ard|arid|ana)\b|&)?\s*"
@@ -664,9 +684,19 @@ def parse_rain_result_summary(text):
     if normalized is None:
         return None
 
+    if text_looks_like_rain_join_prompt(normalized):
+        return None
+
+    if not text_has_rain_result_wording(normalized):
+        return None
+
     from_rain = r"(?:from|fr0m|f(?:r|n)?om|frm|fom)\s+rain\b"
     claimed_word = r"(?:claimed|clalmed|clairned|clamed|daimed)"
     claimed_amount = (
+        rf"(?:\b{claimed_word}\b[^\d]{{0,40}})"
+        rf"(?P<claimed>[0-9]+(?:[.,][0-9]+)?)\s+{from_rain}"
+    )
+    other_claimed_amount = (
         rf"(?:\b{claimed_word}\b[^\d]{{0,40}})?"
         rf"(?P<claimed>[0-9]+(?:[.,][0-9]+)?)\s+{from_rain}"
     )
@@ -674,7 +704,7 @@ def parse_rain_result_summary(text):
     parsed_other_count = False
     if other_match is not None and other_count is not None:
         tail = normalized[other_match.end() :]
-        amount_match = re.search(claimed_amount, tail, re.IGNORECASE)
+        amount_match = re.search(other_claimed_amount, tail, re.IGNORECASE)
         if amount_match:
             names_text = normalized[: other_match.start()]
             named_count = count_rain_result_named_users(names_text)
