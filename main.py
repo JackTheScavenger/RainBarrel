@@ -42,7 +42,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.19"
+APP_VERSION = "1.1.20"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIDENCE_PERCENT = 65
@@ -602,7 +602,7 @@ def parse_rain_tip_amount(text):
 
 
 def count_rain_result_named_users(names_text):
-    title_match = list(re.finditer(r"\brakeback\s+rain\s+", names_text, flags=re.IGNORECASE))
+    title_match = list(re.finditer(r"\brake\s*back\s+rain\s+", names_text, flags=re.IGNORECASE))
     if title_match:
         names_text = names_text[title_match[-1].end():]
     else:
@@ -617,6 +617,31 @@ def count_rain_result_named_users(names_text):
     parts = [part.strip(" ,.:;*#") for part in rough_parts if part.strip(" ,.:;*#")]
 
     return len(parts)
+
+
+def find_rain_result_title_match(text):
+    patterns = (
+        r"\brake\s*back\s+rain\b",
+        r"\brakeb[aeo]ck\s+rain\b",
+        r"\brake[bh]ack\s+rain\b",
+    )
+    matches = []
+    for pattern in patterns:
+        matches.extend(re.finditer(pattern, text, flags=re.IGNORECASE))
+
+    if not matches:
+        return None
+
+    return sorted(matches, key=lambda item: item.start())[-1]
+
+
+def normalize_rain_result_text(text):
+    normalized = re.sub(r"\s+", " ", text or "").strip()
+    title_match = find_rain_result_title_match(normalized)
+    if title_match is None:
+        return None
+
+    return normalized[title_match.start() :]
 
 
 def find_rain_result_other_count(text):
@@ -635,7 +660,10 @@ def find_rain_result_other_count(text):
 
 
 def parse_rain_result_summary(text):
-    normalized = re.sub(r"\s+", " ", text)
+    normalized = normalize_rain_result_text(text)
+    if normalized is None:
+        return None
+
     from_rain = r"(?:from|fr0m|f(?:r|n)?om|frm|fom)\s+rain\b"
     claimed_word = r"(?:claimed|clalmed|clairned|clamed|daimed)"
     claimed_amount = (
@@ -1116,14 +1144,17 @@ def read_rain_result_from_screen(allow_full_screen_ocr=True):
                 f"({result['people_joined']} people, "
                 f"{result['total_scrap_claimed']:.2f} scrap)",
             )
+        text_preview = compact_ocr_preview(text)
     else:
-        text = ""
+        text_preview = ""
 
     if result_box_detail:
         return None, result_box_detail
 
     if allow_full_screen_ocr:
-        return None, "Rain result summary not visible " f"(OCR saw: {compact_ocr_preview(text)})"
+        if find_rain_result_title_match(text or "") is None:
+            return None, "Rain result title not visible " f"(OCR saw: {text_preview})"
+        return None, "Rain result summary not parsed " f"(OCR saw: {text_preview})"
     return None, "Rain result yellow box not visible"
 
 
