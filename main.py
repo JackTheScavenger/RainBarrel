@@ -42,7 +42,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.18"
+APP_VERSION = "1.1.19"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIDENCE_PERCENT = 65
@@ -535,6 +535,34 @@ def parse_scrap_number(value):
         return None
 
 
+def parse_ocr_int(value):
+    if value is None:
+        return None
+
+    normalized = str(value).translate(
+        str.maketrans(
+            {
+                "O": "0",
+                "o": "0",
+                "I": "1",
+                "l": "1",
+                "|": "1",
+                "S": "5",
+                "s": "5",
+                "B": "8",
+            }
+        )
+    )
+    normalized = re.sub(r"[^0-9]", "", normalized)
+    if not normalized:
+        return None
+
+    try:
+        return int(normalized)
+    except ValueError:
+        return None
+
+
 def parse_ocr_scrap_number(value):
     if value is None:
         return None
@@ -591,6 +619,21 @@ def count_rain_result_named_users(names_text):
     return len(parts)
 
 
+def find_rain_result_other_count(text):
+    other_pattern = re.compile(
+        r"(?:\b(?:and|ard|arid|ana)\b|&)?\s*"
+        r"(?P<others>[0-9OSBIl|]{1,5})\s*"
+        r"(?:other|0ther|otner|uther|othcr)\s+bandits?",
+        re.IGNORECASE,
+    )
+    matches = list(other_pattern.finditer(text))
+    if not matches:
+        return None, None
+
+    match = matches[-1]
+    return parse_ocr_int(match.group("others")), match
+
+
 def parse_rain_result_summary(text):
     normalized = re.sub(r"\s+", " ", text)
     from_rain = r"(?:from|fr0m|f(?:r|n)?om|frm|fom)\s+rain\b"
@@ -599,18 +642,19 @@ def parse_rain_result_summary(text):
         rf"(?:\b{claimed_word}\b[^\d]{{0,40}})?"
         rf"(?P<claimed>[0-9]+(?:[.,][0-9]+)?)\s+{from_rain}"
     )
-    match = re.search(
-        r"(?P<names>.*?)\s+and\s+(?P<others>\d+)\s+(?:other|0ther)\s+bandits?\s+"
-        + claimed_amount,
-        normalized,
-        re.IGNORECASE,
-    )
+    other_count, other_match = find_rain_result_other_count(normalized)
+    parsed_other_count = False
+    if other_match is not None and other_count is not None:
+        tail = normalized[other_match.end() :]
+        amount_match = re.search(claimed_amount, tail, re.IGNORECASE)
+        if amount_match:
+            names_text = normalized[: other_match.start()]
+            named_count = count_rain_result_named_users(names_text)
+            people_joined = named_count + int(other_count)
+            total_claimed = float(amount_match.group("claimed").replace(",", "."))
+            parsed_other_count = True
 
-    if match:
-        named_count = count_rain_result_named_users(match.group("names"))
-        people_joined = named_count + int(match.group("others"))
-        total_claimed = float(match.group("claimed").replace(",", "."))
-    else:
+    if not parsed_other_count:
         match = re.search(
             r"(?P<names>.*?)\s+" + claimed_amount,
             normalized,
@@ -1042,7 +1086,12 @@ def read_rain_result_from_screen(allow_full_screen_ocr=True):
 
             result = parse_rain_result_summary(text)
             if result is not None:
-                return result, "Read rain result yellow box"
+                return (
+                    result,
+                    "Read rain result yellow box "
+                    f"({result['people_joined']} people, "
+                    f"{result['total_scrap_claimed']:.2f} scrap)",
+                )
             previews.append(compact_ocr_preview(text))
 
         if previews:
@@ -1061,7 +1110,12 @@ def read_rain_result_from_screen(allow_full_screen_ocr=True):
 
         result = parse_rain_result_summary(text)
         if result is not None:
-            return result, "Read rain result summary"
+            return (
+                result,
+                "Read rain result summary "
+                f"({result['people_joined']} people, "
+                f"{result['total_scrap_claimed']:.2f} scrap)",
+            )
     else:
         text = ""
 
@@ -3770,6 +3824,103 @@ try {{
         if self.current_page == "Stats" and self.active_stats_page == "Rain":
             self.stats_page("Rain")
 
+    def parse_saved_timestamp(self, value):
+        try:
+            return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError):
+            return None
+
+    def remove_matching_rain_reward_for_result(self, result_item):
+        reward_amount = parse_scrap_number(result_item.get("your_reward"))
+        result_time = self.parse_saved_timestamp(result_item.get("time"))
+        if reward_amount is None or not self.rain_reward_history:
+            return None
+
+        best_index = None
+        best_time_delta = None
+        for index, reward_item in enumerate(self.rain_reward_history):
+            amount = parse_scrap_number(reward_item.get("amount"))
+            if amount is None or abs(amount - reward_amount) > 0.001:
+                continue
+
+            reward_time = self.parse_saved_timestamp(reward_item.get("time"))
+            if result_time is not None and reward_time is not None:
+                time_delta = abs((result_time - reward_time).total_seconds())
+                if time_delta > RAIN_TRACKER_WATCH_SECONDS:
+                    continue
+            else:
+                time_delta = 0
+
+            if best_index is None or time_delta < best_time_delta:
+                best_index = index
+                best_time_delta = time_delta
+
+        if best_index is None:
+            return None
+
+        return self.rain_reward_history.pop(best_index)
+
+    def recalculate_rain_reward_stats(self):
+        self.total_rain_collected = round(
+            sum(
+                parse_scrap_number(item.get("amount")) or 0.0
+                for item in self.rain_reward_history
+            ),
+            2,
+        )
+        self.last_rain_reward = (
+            parse_scrap_number(self.rain_reward_history[-1].get("amount")) or 0.0
+            if self.rain_reward_history
+            else 0.0
+        )
+
+        session_start = None
+        if self.current_session_started_at is not None:
+            session_start = datetime.fromtimestamp(self.current_session_started_at)
+        else:
+            session_start = self.parse_saved_timestamp(self.current_session_started_label)
+
+        if session_start is not None:
+            self.current_session_rain_collected = round(
+                sum(
+                    parse_scrap_number(item.get("amount")) or 0.0
+                    for item in self.rain_reward_history
+                    if (
+                        self.parse_saved_timestamp(item.get("time")) is not None
+                        and self.parse_saved_timestamp(item.get("time")) >= session_start
+                    )
+                ),
+                2,
+            )
+        elif not self.running:
+            self.current_session_rain_collected = 0.0
+
+    def delete_rain_result(self, history_index):
+        if history_index < 0 or history_index >= len(self.rain_result_history):
+            return
+
+        removed_result = self.rain_result_history.pop(history_index)
+        removed_reward = self.remove_matching_rain_reward_for_result(removed_result)
+        self.recalculate_rain_reward_stats()
+        self.last_action = "Deleted rain result"
+        self.save_stats()
+
+        reward_detail = ""
+        if removed_reward is not None:
+            removed_amount = parse_scrap_number(removed_reward.get("amount")) or 0.0
+            reward_detail = f" and removed matching reward {self.format_rain_amount(removed_amount)}"
+
+        self.log(
+            "Deleted rain result: "
+            f"{removed_result.get('people_joined', '--')} people | "
+            f"you got {self.format_rain_amount(removed_result.get('your_reward', 0.0))}"
+            f"{reward_detail}"
+        )
+
+        if self.current_page == "Stats" and self.active_stats_page == "Rain":
+            self.stats_page("Rain")
+        self.refresh_stats_now()
+
     def refresh_keep_awake_state(self):
         flags = ES_CONTINUOUS
         if self.running or self.weather_station_active or self.battle_running:
@@ -5180,6 +5331,21 @@ try {{
             self.build_rain_result_log(scroll)
             self.build_hourly_rain_chart(scroll)
 
+    def get_trash_icon(self):
+        if hasattr(self, "trash_icon"):
+            return self.trash_icon
+
+        icon = Image.new("RGBA", (18, 18), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(icon)
+        color = (232, 224, 213, 255)
+        draw.rounded_rectangle((5, 6, 13, 15), radius=1, outline=color, width=2)
+        draw.line((4, 5, 14, 5), fill=color, width=2)
+        draw.line((7, 3, 11, 3), fill=color, width=2)
+        draw.line((7, 8, 7, 13), fill=color, width=1)
+        draw.line((11, 8, 11, 13), fill=color, width=1)
+        self.trash_icon = ctk.CTkImage(light_image=icon, dark_image=icon, size=(16, 16))
+        return self.trash_icon
+
     def build_rain_result_log(self, parent):
         card = ctk.CTkFrame(
             parent,
@@ -5210,8 +5376,9 @@ try {{
         table.pack(fill="x", padx=18, pady=(0, 18))
         for index, weight in enumerate((2, 1, 1, 1, 1)):
             table.grid_columnconfigure(index, weight=weight, uniform="rain_result")
+        table.grid_columnconfigure(5, weight=0, minsize=42)
 
-        headers = ["TIME", "PEOPLE", "TIPPED", "COLLECTED", "MINE"]
+        headers = ["TIME", "PEOPLE", "TIPPED", "COLLECTED", "MINE", ""]
         for column, header in enumerate(headers):
             ctk.CTkLabel(
                 table,
@@ -5220,7 +5387,11 @@ try {{
                 font=ctk.CTkFont(size=11, weight="bold"),
             ).grid(row=0, column=column, sticky="w", padx=8, pady=(0, 6))
 
-        for row_index, item in enumerate(reversed(self.rain_result_history[-20:]), start=1):
+        visible_results = list(enumerate(self.rain_result_history[-20:]))
+        first_visible_index = len(self.rain_result_history) - len(visible_results)
+
+        for row_index, (relative_index, item) in enumerate(reversed(visible_results), start=1):
+            history_index = first_visible_index + relative_index
             try:
                 timestamp = datetime.strptime(item.get("time", ""), "%Y-%m-%d %H:%M:%S")
                 display_time = timestamp.strftime("%m/%d %I:%M %p").replace(" 0", " ")
@@ -5245,6 +5416,22 @@ try {{
                     text_color=COLORS["text"] if column == 0 else COLORS["red2"],
                     font=ctk.CTkFont(size=12, weight="bold" if column > 0 else "normal"),
                 ).pack(anchor="w", padx=6, pady=5)
+
+            delete_cell = ctk.CTkFrame(table, fg_color=row_color, corner_radius=6)
+            delete_cell.grid(row=row_index, column=5, sticky="ew", padx=2, pady=2)
+            ctk.CTkButton(
+                delete_cell,
+                text="",
+                image=self.get_trash_icon(),
+                width=28,
+                height=28,
+                corner_radius=6,
+                fg_color="#241714",
+                hover_color="#3a211c",
+                border_width=1,
+                border_color="#3b2620",
+                command=lambda index=history_index: self.delete_rain_result(index),
+            ).pack(padx=4, pady=3)
 
     # ================= LOGGING =================
 
