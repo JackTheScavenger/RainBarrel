@@ -42,7 +42,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.17"
+APP_VERSION = "1.1.18"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIDENCE_PERCENT = 65
@@ -109,7 +109,7 @@ RAIN_FOUND_COOLDOWN_SECONDS = 3 * 60
 WEATHER_RAIN_FOUND_COOLDOWN_SECONDS = 3 * 60
 RAIN_REWARD_SCAN_INTERVAL_SECONDS = 1
 RAIN_RESULT_SCAN_INTERVAL_SECONDS = 1
-RAIN_RESULT_FULL_SCREEN_OCR_EVERY = 8
+RAIN_RESULT_FULL_SCREEN_OCR_EVERY = 2
 RAIN_TIP_SCAN_INTERVAL_SECONDS = 1
 RAIN_TIP_MISSES_AFTER_FOUND_TO_STOP = 3
 RAIN_TIP_READING_CONFIRMATIONS = 2
@@ -135,6 +135,7 @@ RAIN_JOINED_BOX_CROP_HEIGHT = 280
 RAIN_JOINED_TIP_LINE_RECTS = ((0.03, 0.30, 0.96, 0.68), (0.03, 0.42, 0.96, 0.66))
 RAIN_RESULT_MIN_BOX_WIDTH = 180
 RAIN_RESULT_MIN_BOX_HEIGHT = 60
+RAIN_RESULT_CANDIDATE_LIMIT = 6
 OCR_PREVIEW_LIMIT = 140
 RAIN_REWARD_HISTORY_LIMIT = 100
 RAIN_LOG_HISTORY_LIMIT = 500
@@ -592,9 +593,14 @@ def count_rain_result_named_users(names_text):
 
 def parse_rain_result_summary(text):
     normalized = re.sub(r"\s+", " ", text)
-    claimed_amount = r"\bclaimed\b[^\d]{0,32}(?P<claimed>[0-9]+(?:[.,][0-9]+)?)\s+from\s+rain\b"
+    from_rain = r"(?:from|fr0m|f(?:r|n)?om|frm|fom)\s+rain\b"
+    claimed_word = r"(?:claimed|clalmed|clairned|clamed|daimed)"
+    claimed_amount = (
+        rf"(?:\b{claimed_word}\b[^\d]{{0,40}})?"
+        rf"(?P<claimed>[0-9]+(?:[.,][0-9]+)?)\s+{from_rain}"
+    )
     match = re.search(
-        r"(?P<names>.*?)\s+and\s+(?P<others>\d+)\s+other\s+bandits?\s+"
+        r"(?P<names>.*?)\s+and\s+(?P<others>\d+)\s+(?:other|0ther)\s+bandits?\s+"
         + claimed_amount,
         normalized,
         re.IGNORECASE,
@@ -856,6 +862,17 @@ def format_rain_tip_read_counts(read_counts, limit=4):
     )
 
 
+def build_rain_result_ocr_images(crop):
+    base = crop.convert("RGB")
+    enlarged = base.resize(
+        (max(1, base.width * 2), max(1, base.height * 2)),
+        Image.Resampling.LANCZOS,
+    )
+    enhanced = ImageEnhance.Contrast(enlarged).enhance(1.7)
+    enhanced = ImageEnhance.Sharpness(enhanced).enhance(1.8)
+    return (base, enhanced)
+
+
 def find_rain_result_candidate_crops(screenshot):
     image_rgb = np.array(screenshot.convert("RGB"))
     hsv = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2HSV)
@@ -894,7 +911,7 @@ def find_rain_result_candidate_crops(screenshot):
         )
 
     candidates.sort(key=lambda item: item["area"], reverse=True)
-    return [item["crop"] for item in candidates[:4]]
+    return [item["crop"] for item in candidates[:RAIN_RESULT_CANDIDATE_LIMIT]]
 
 
 async def ocr_image_with_windows(image):
@@ -1014,20 +1031,25 @@ def read_rain_result_from_screen(allow_full_screen_ocr=True):
 
     result_box_detail = None
     for crop in find_rain_result_candidate_crops(screenshot):
-        try:
-            text = run_windows_ocr(crop)
-        except (ImportError, ModuleNotFoundError):
-            return None, "Windows OCR packages are not installed"
-        except Exception:
-            continue
+        previews = []
+        for ocr_crop in build_rain_result_ocr_images(crop):
+            try:
+                text = run_windows_ocr(ocr_crop)
+            except (ImportError, ModuleNotFoundError):
+                return None, "Windows OCR packages are not installed"
+            except Exception:
+                continue
 
-        result = parse_rain_result_summary(text)
-        if result is not None:
-            return result, "Read rain result yellow box"
-        result_box_detail = (
-            "Rain result yellow box found but summary was not parsed "
-            f"(OCR saw: {compact_ocr_preview(text)})"
-        )
+            result = parse_rain_result_summary(text)
+            if result is not None:
+                return result, "Read rain result yellow box"
+            previews.append(compact_ocr_preview(text))
+
+        if previews:
+            result_box_detail = (
+                "Rain result yellow box found but summary was not parsed "
+                f"(OCR saw: {' | '.join(previews[:2])})"
+            )
 
     if allow_full_screen_ocr:
         try:
@@ -3650,6 +3672,7 @@ try {{
     def rain_result_tracker_worker(self, run_id):
         last_detail = None
         scan_count = 0
+        result_parse_warning_logged = False
 
         try:
             while time.time() < self.get_rain_tracking_watch_until() and run_id == self.rain_result_tracker_run_id:
@@ -3660,6 +3683,14 @@ try {{
                 result, detail = read_rain_result_from_screen(
                     allow_full_screen_ocr=scan_count % RAIN_RESULT_FULL_SCREEN_OCR_EVERY == 0
                 )
+                if (
+                    result is None
+                    and not result_parse_warning_logged
+                    and detail.startswith("Rain result yellow box found")
+                ):
+                    result_parse_warning_logged = True
+                    self.log(detail)
+
                 if result is not None:
                     with self.rain_tracking_lock:
                         self.pending_rain_tracking_result = result
@@ -3674,7 +3705,7 @@ try {{
                 time.sleep(RAIN_RESULT_SCAN_INTERVAL_SECONDS)
 
             if run_id == self.rain_result_tracker_run_id and last_detail:
-                self.log(f"Rain result tracker stopped: {last_detail}")
+                self.log(f"Rain result tracker stopped after {scan_count} scans: {last_detail}")
         finally:
             with self.rain_reward_lock:
                 if run_id == self.rain_result_tracker_run_id:
