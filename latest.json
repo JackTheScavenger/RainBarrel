@@ -1,6 +1,6 @@
 {
-  "version": "1.1.16",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.16/RainBarrel.exe",
-  "sha256": "e29ac84858d61187a80866506a9dbc83617c642fc2ec836e65d8d62e50b20c2b",
-  "notes": "Added after-click popup detection, a configurable popup watch timer, checkbox clicking, and a Rain stat for total after-click popups clicked."
+  "version": "1.1.17",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.17/RainBarrel.exe",
+  "sha256": "af7dc9119b37acf408998a3f53cca6bab1f5bac7d20c177fabc3caae8dcdac8b",
+  "notes": "Tightened after-click popup detection to avoid random clicks by requiring stronger image confidence, color matching, and popup layout validation."
 }
