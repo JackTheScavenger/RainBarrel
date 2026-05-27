@@ -42,7 +42,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.16"
+APP_VERSION = "1.1.17"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIDENCE_PERCENT = 65
@@ -146,10 +146,12 @@ SCROLL_WHEEL_SPEED_MULTIPLIER = 3
 RAIN_TARGET_TEMPLATE_SCALES = (0.80, 0.85, 0.90, 0.95, 1.0, 1.05, 1.10, 1.15, 1.20, 1.30, 1.40, 1.60)
 RAIN_TARGET_MAX_COLOR_DIFF = 45.0
 DEFAULT_POPUP_AFTER_RAIN_WAIT_SECONDS = 10
-POPUP_AFTER_RAIN_CONFIDENCE = 0.65
+POPUP_AFTER_RAIN_CONFIDENCE = 0.82
+POPUP_AFTER_RAIN_MAX_COLOR_DIFF = 32.0
 POPUP_AFTER_RAIN_TEMPLATE_SCALES = (0.80, 0.85, 0.90, 0.95, 1.0, 1.05, 1.10, 1.15, 1.20, 1.30, 1.40)
 POPUP_AFTER_RAIN_CHECKBOX_X_RATIO = 52 / 346
 POPUP_AFTER_RAIN_CHECKBOX_Y_RATIO = 76 / 141
+POPUP_AFTER_RAIN_CHECKBOX_RECT = (39 / 346, 64 / 141, 65 / 346, 89 / 141)
 
 OCR_LOCK = threading.Lock()
 
@@ -288,8 +290,72 @@ def locate_popup_after_rain_all_monitors():
         POPUP_AFTER_RAIN_IMAGE_PATH,
         confidence=POPUP_AFTER_RAIN_CONFIDENCE,
         scales=POPUP_AFTER_RAIN_TEMPLATE_SCALES,
-        grayscale=True,
+        grayscale=False,
+        max_color_diff=POPUP_AFTER_RAIN_MAX_COLOR_DIFF,
     )
+
+
+def get_screen_crop_for_match(match):
+    with mss.mss() as sct:
+        monitor = sct.monitors[0]
+        screen = np.array(sct.grab(monitor))
+
+    left = int(match["left"] - monitor["left"])
+    top = int(match["top"] - monitor["top"])
+    width = int(match["width"])
+    height = int(match["height"])
+    if width <= 0 or height <= 0:
+        return None
+
+    crop = screen[top : top + height, left : left + width]
+    if crop.size == 0:
+        return None
+
+    return cv2.cvtColor(crop, cv2.COLOR_BGRA2RGB)
+
+
+def validate_popup_after_rain_match(match):
+    crop = get_screen_crop_for_match(match)
+    if crop is None:
+        return False, "popup crop was empty"
+
+    height, width = crop.shape[:2]
+    title = crop[
+        int(height * 0.03) : max(int(height * 0.25), int(height * 0.03) + 1),
+        int(width * 0.03) : max(int(width * 0.70), int(width * 0.03) + 1),
+    ]
+    green_pixels = (
+        (title[:, :, 1] > 145)
+        & (title[:, :, 0] > 75)
+        & (title[:, :, 2] < 150)
+        & ((title[:, :, 1].astype(np.int16) - title[:, :, 0].astype(np.int16)) > 25)
+    )
+    green_ratio = float(green_pixels.mean()) if green_pixels.size else 0.0
+
+    left_ratio, top_ratio, right_ratio, bottom_ratio = POPUP_AFTER_RAIN_CHECKBOX_RECT
+    checkbox = crop[
+        int(height * top_ratio) : max(int(height * bottom_ratio), int(height * top_ratio) + 1),
+        int(width * left_ratio) : max(int(width * right_ratio), int(width * left_ratio) + 1),
+    ]
+    dark_pixels = (
+        (checkbox[:, :, 0] < 85)
+        & (checkbox[:, :, 1] < 85)
+        & (checkbox[:, :, 2] < 85)
+    )
+    light_pixels = (
+        (checkbox[:, :, 0] > 120)
+        & (checkbox[:, :, 1] > 120)
+        & (checkbox[:, :, 2] > 120)
+    )
+    dark_ratio = float(dark_pixels.mean()) if dark_pixels.size else 0.0
+    light_ratio = float(light_pixels.mean()) if light_pixels.size else 0.0
+
+    valid = green_ratio >= 0.05 and dark_ratio >= 0.45 and light_ratio >= 0.02
+    detail = (
+        f"green title={green_ratio:.2f}, "
+        f"checkbox dark={dark_ratio:.2f}, checkbox light={light_ratio:.2f}"
+    )
+    return valid, detail
 
 
 def locate_image_matches_all_monitors(image_path, confidence=0.65, max_matches=8):
@@ -5311,6 +5377,7 @@ try {{
         wait_seconds = self.get_popup_after_rain_wait_seconds()
         deadline = time.time() + wait_seconds
         best_match = None
+        last_rejection_detail = None
 
         while self.running and time.time() < deadline:
             try:
@@ -5320,6 +5387,13 @@ try {{
                 return False
 
             if match:
+                valid_match, validation_detail = validate_popup_after_rain_match(match)
+                if not valid_match:
+                    last_rejection_detail = validation_detail
+                    best_match = match
+                    time.sleep(0.5)
+                    continue
+
                 click_x = int(
                     match["left"]
                     + match["width"] * POPUP_AFTER_RAIN_CHECKBOX_X_RATIO
@@ -5333,6 +5407,7 @@ try {{
                 self.log(
                     "Found after-click popup "
                     f"| confidence={match['score']:.3f} scale={match['scale']:.2f}; "
+                    f"{validation_detail}; "
                     f"clicking checkbox at X={click_x} Y={click_y}"
                 )
 
@@ -5357,10 +5432,22 @@ try {{
             time.sleep(0.5)
 
         if best_match:
+            color_diff = best_match.get("color_diff")
+            color_detail = (
+                f", color diff={color_diff:.1f}/{POPUP_AFTER_RAIN_MAX_COLOR_DIFF:.1f}"
+                if color_diff is not None
+                else ""
+            )
+            rejection_detail = (
+                f", rejected: {last_rejection_detail}"
+                if last_rejection_detail
+                else ""
+            )
             self.log(
                 "After-click popup not found "
                 f"within {wait_seconds}s (best confidence={best_match['score']:.3f}, "
-                f"needed={POPUP_AFTER_RAIN_CONFIDENCE:.3f}, scale={best_match['scale']:.2f})"
+                f"needed={POPUP_AFTER_RAIN_CONFIDENCE:.3f}, scale={best_match['scale']:.2f}"
+                f"{color_detail}{rejection_detail})"
             )
         else:
             self.log(f"After-click popup not found within {wait_seconds}s")
