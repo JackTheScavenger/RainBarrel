@@ -42,7 +42,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.15"
+APP_VERSION = "1.1.16"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIDENCE_PERCENT = 65
@@ -91,6 +91,7 @@ IMAGE_PATH = resource_path("Join Rain Event.png")
 BATTLE_DISCOUNT_IMAGE_PATH = resource_path("100 % off .png")
 RAIN_REWARD_IMAGE_PATH = resource_path("Rain amount.png")
 RAIN_JOINED_IMAGE_PATH = resource_path("Rain Joined.png")
+POPUP_AFTER_RAIN_IMAGE_PATH = resource_path("PopupAfterRain.png")
 ICON_PATH = resource_path("app_icon.ico")
 DEFAULT_DATA_PATH = resource_path("bandit_data.json")
 DATA_PATH = app_data_path("bandit_data.json")
@@ -144,6 +145,11 @@ WEATHER_RAIN_MAX_ACTIVE_SECONDS = 10 * 60
 SCROLL_WHEEL_SPEED_MULTIPLIER = 3
 RAIN_TARGET_TEMPLATE_SCALES = (0.80, 0.85, 0.90, 0.95, 1.0, 1.05, 1.10, 1.15, 1.20, 1.30, 1.40, 1.60)
 RAIN_TARGET_MAX_COLOR_DIFF = 45.0
+DEFAULT_POPUP_AFTER_RAIN_WAIT_SECONDS = 10
+POPUP_AFTER_RAIN_CONFIDENCE = 0.65
+POPUP_AFTER_RAIN_TEMPLATE_SCALES = (0.80, 0.85, 0.90, 0.95, 1.0, 1.05, 1.10, 1.15, 1.20, 1.30, 1.40)
+POPUP_AFTER_RAIN_CHECKBOX_X_RATIO = 52 / 346
+POPUP_AFTER_RAIN_CHECKBOX_Y_RATIO = 76 / 141
 
 OCR_LOCK = threading.Lock()
 
@@ -234,6 +240,8 @@ def locate_image_best_all_monitors(
                 )
 
             candidate = {
+                "left": monitor["left"] + int(max_loc[0]),
+                "top": monitor["top"] + int(max_loc[1]),
                 "x": monitor["left"] + max_loc[0] + scaled_w // 2,
                 "y": monitor["top"] + max_loc[1] + scaled_h // 2,
                 "score": float(max_val),
@@ -272,6 +280,15 @@ def locate_rain_target_all_monitors(confidence=0.65):
         scales=RAIN_TARGET_TEMPLATE_SCALES,
         grayscale=True,
         max_color_diff=RAIN_TARGET_MAX_COLOR_DIFF,
+    )
+
+
+def locate_popup_after_rain_all_monitors():
+    return locate_image_best_all_monitors(
+        POPUP_AFTER_RAIN_IMAGE_PATH,
+        confidence=POPUP_AFTER_RAIN_CONFIDENCE,
+        scales=POPUP_AFTER_RAIN_TEMPLATE_SCALES,
+        grayscale=True,
     )
 
 
@@ -1603,6 +1620,17 @@ class App(ctk.CTk):
                 100,
             )
         )
+        self.popup_after_rain_wait_seconds = ctk.IntVar(
+            value=clamp_int_setting(
+                saved_settings.get(
+                    "popup_after_rain_wait_seconds",
+                    DEFAULT_POPUP_AFTER_RAIN_WAIT_SECONDS,
+                ),
+                DEFAULT_POPUP_AFTER_RAIN_WAIT_SECONDS,
+                5,
+                30,
+            )
+        )
         self.weather_station_interval = ctk.IntVar(
             value=clamp_int_setting(
                 saved_settings.get("weather_station_interval", DEFAULT_WEATHER_STATION_INTERVAL),
@@ -1658,6 +1686,9 @@ class App(ctk.CTk):
             saved_stats.get("total_rains_clicked", saved_stats.get("click_count", 0))
         )
         self.total_rain_collected = float(saved_stats.get("total_rain_collected", 0.0))
+        self.total_after_rain_popups_clicked = int(
+            saved_stats.get("total_after_rain_popups_clicked", 0)
+        )
         self.last_rain_reward = float(saved_stats.get("last_rain_reward", 0.0))
         self.rain_reward_history = saved_stats.get("rain_reward_history", [])
         if not isinstance(self.rain_reward_history, list):
@@ -2268,6 +2299,15 @@ try {{
                 0,
                 100,
             ),
+            "popup_after_rain_wait_seconds": clamp_int_setting(
+                self.get_setting_value(
+                    self.popup_after_rain_wait_seconds,
+                    DEFAULT_POPUP_AFTER_RAIN_WAIT_SECONDS,
+                ),
+                DEFAULT_POPUP_AFTER_RAIN_WAIT_SECONDS,
+                5,
+                30,
+            ),
             "weather_station_interval": clamp_int_setting(
                 self.get_setting_value(
                     self.weather_station_interval,
@@ -2298,6 +2338,7 @@ try {{
             "total_search_time_seconds": round(self.get_total_search_time_seconds(), 1),
             "total_rains_clicked": int(self.total_rains_clicked),
             "total_rain_collected": round(self.total_rain_collected, 2),
+            "total_after_rain_popups_clicked": int(self.total_after_rain_popups_clicked),
             "last_rain_reward": round(self.last_rain_reward, 2),
             "rain_reward_history": self.rain_reward_history[-RAIN_REWARD_HISTORY_LIMIT:],
             "rain_result_history": self.rain_result_history[-RAIN_REWARD_HISTORY_LIMIT:],
@@ -2485,6 +2526,17 @@ try {{
             90,
         )
 
+    def get_popup_after_rain_wait_seconds(self):
+        return clamp_int_setting(
+            self.get_setting_value(
+                self.popup_after_rain_wait_seconds,
+                DEFAULT_POPUP_AFTER_RAIN_WAIT_SECONDS,
+            ),
+            DEFAULT_POPUP_AFTER_RAIN_WAIT_SECONDS,
+            5,
+            30,
+        )
+
     def get_move_time(self):
         return clamp_float_setting(
             self.get_setting_value(self.move_time, DEFAULT_MOVE_TIME),
@@ -2543,6 +2595,11 @@ try {{
             clamp_int_setting(value, DEFAULT_WEATHER_NOTIFICATION_VOLUME, 0, 100)
         )
 
+    def set_popup_after_rain_wait_seconds(self, value):
+        self.popup_after_rain_wait_seconds.set(
+            clamp_int_setting(value, DEFAULT_POPUP_AFTER_RAIN_WAIT_SECONDS, 5, 30)
+        )
+
     def apply_rain_settings(self):
         self.set_confidence_percent(
             self.get_setting_value(self.confidence, DEFAULT_CONFIDENCE_PERCENT)
@@ -2554,6 +2611,12 @@ try {{
         self.set_move_steps_setting(self.get_setting_value(self.move_steps, DEFAULT_MOVE_STEPS))
         self.set_rain_collect_chance(
             self.get_setting_value(self.rain_collect_chance, DEFAULT_RAIN_COLLECT_CHANCE)
+        )
+        self.set_popup_after_rain_wait_seconds(
+            self.get_setting_value(
+                self.popup_after_rain_wait_seconds,
+                DEFAULT_POPUP_AFTER_RAIN_WAIT_SECONDS,
+            )
         )
         self.set_weather_station_interval_setting(
             self.get_setting_value(
@@ -2694,6 +2757,7 @@ try {{
         self.rain_collect_start_time.set(DEFAULT_RAIN_COLLECT_START_TIME)
         self.rain_collect_end_time.set(DEFAULT_RAIN_COLLECT_END_TIME)
         self.rain_collect_chance.set(DEFAULT_RAIN_COLLECT_CHANCE)
+        self.popup_after_rain_wait_seconds.set(DEFAULT_POPUP_AFTER_RAIN_WAIT_SECONDS)
         self.weather_station_interval.set(DEFAULT_WEATHER_STATION_INTERVAL)
         self.weather_notification_volume.set(DEFAULT_WEATHER_NOTIFICATION_VOLUME)
         self.weather_station_warn_before_open.set(True)
@@ -3121,6 +3185,7 @@ try {{
         self.total_search_time_seconds = 0.0
         self.total_rains_clicked = 0
         self.total_rain_collected = 0.0
+        self.total_after_rain_popups_clicked = 0
         self.last_rain_reward = 0.0
         self.rain_reward_history = []
         self.rain_result_history = []
@@ -3158,6 +3223,9 @@ try {{
         self.total_search_time_seconds = float(stats.get("total_search_time_seconds", 0.0))
         self.total_rains_clicked = int(stats.get("total_rains_clicked", stats.get("click_count", 0)))
         self.total_rain_collected = float(stats.get("total_rain_collected", 0.0))
+        self.total_after_rain_popups_clicked = int(
+            stats.get("total_after_rain_popups_clicked", 0)
+        )
         self.last_rain_reward = float(stats.get("last_rain_reward", 0.0))
         self.rain_reward_history = self.clean_rain_reward_history(stats.get("rain_reward_history", []))
         self.rain_result_history = self.clean_rain_result_history(stats.get("rain_result_history", []))
@@ -3989,6 +4057,14 @@ try {{
                 10,
                 90,
                 command=self.set_interval_setting,
+                step=1,
+            )
+            self.add_setting(
+                "After-Click Popup Watch Seconds",
+                self.popup_after_rain_wait_seconds,
+                5,
+                30,
+                command=self.set_popup_after_rain_wait_seconds,
                 step=1,
             )
             self.add_setting(
@@ -4861,6 +4937,10 @@ try {{
                         ("Total Rains Clicked", str(self.total_rains_clicked)),
                         ("Total Rain Collected", self.format_rain_amount(self.total_rain_collected)),
                         (
+                            "Total After-Click Popups Clicked",
+                            str(self.total_after_rain_popups_clicked),
+                        ),
+                        (
                             "Average Rain Per Hour",
                             self.format_rain_amount_per_hour(self.get_average_rain_collected_per_hour()),
                         ),
@@ -5227,6 +5307,66 @@ try {{
         if run_id == self.battle_run_id:
             self.after(0, self.sync_battle_controls)
 
+    def wait_for_popup_after_rain_and_click(self):
+        wait_seconds = self.get_popup_after_rain_wait_seconds()
+        deadline = time.time() + wait_seconds
+        best_match = None
+
+        while self.running and time.time() < deadline:
+            try:
+                match, best_match = locate_popup_after_rain_all_monitors()
+            except FileNotFoundError:
+                self.log("After-click popup image not found in app files")
+                return False
+
+            if match:
+                click_x = int(
+                    match["left"]
+                    + match["width"] * POPUP_AFTER_RAIN_CHECKBOX_X_RATIO
+                    + random.randint(-3, 3)
+                )
+                click_y = int(
+                    match["top"]
+                    + match["height"] * POPUP_AFTER_RAIN_CHECKBOX_Y_RATIO
+                    + random.randint(-3, 3)
+                )
+                self.log(
+                    "Found after-click popup "
+                    f"| confidence={match['score']:.3f} scale={match['scale']:.2f}; "
+                    f"clicking checkbox at X={click_x} Y={click_y}"
+                )
+
+                move_cursor_smooth(
+                    click_x,
+                    click_y,
+                    total_time=self.get_move_time(),
+                    steps=self.get_move_steps(),
+                )
+
+                if not self.running:
+                    return False
+
+                pyautogui.click(click_x, click_y)
+                self.total_after_rain_popups_clicked += 1
+                self.save_stats()
+                self.log("Clicked after-click popup checkbox")
+                if self.current_page == "Stats" and self.active_stats_page == "Rain":
+                    self.after(0, lambda: self.stats_page("Rain"))
+                return True
+
+            time.sleep(0.5)
+
+        if best_match:
+            self.log(
+                "After-click popup not found "
+                f"within {wait_seconds}s (best confidence={best_match['score']:.3f}, "
+                f"needed={POPUP_AFTER_RAIN_CONFIDENCE:.3f}, scale={best_match['scale']:.2f})"
+            )
+        else:
+            self.log(f"After-click popup not found within {wait_seconds}s")
+
+        return False
+
     def toggle(self):
         self.running = not self.running
 
@@ -5297,6 +5437,7 @@ try {{
                     self.after(0, self.save_stats)
                     self.log("Clicked rain join button")
                     self.start_rain_trackers("rain clicker")
+                    self.wait_for_popup_after_rain_and_click()
 
                     move_away_x, move_away_y = get_random_point_all_monitors(
                         avoid_x=x,

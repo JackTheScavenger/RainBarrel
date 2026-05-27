@@ -91,6 +91,7 @@ a = Analysis(
     datas=[
         ('app_icon.ico', '.'),
         ('Join Rain Event.png', '.'),
+        ('PopupAfterRain.png', '.'),
         ('Rain Joined.png', '.'),
         ('100 % off .png', '.'),
         ('Rain amount.png', '.'),
