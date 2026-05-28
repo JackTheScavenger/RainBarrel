@@ -42,7 +42,7 @@ from PIL import Image, ImageTk, ImageDraw, ImageEnhance, ImageFilter, ImageOps
 # ================= CONFIG =================
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.1.21"
+APP_VERSION = "1.1.22"
 APP_USER_MODEL_ID = "JackTheScavenger.RainBarrel"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIDENCE_PERCENT = 65
@@ -3167,13 +3167,11 @@ try {{
 
         return hourly_values
 
-    def get_typical_hourly_value(self, values):
+    def get_average_hourly_value(self, values):
         if not values:
             return None
 
-        values = sorted(values)
-        midpoint = (len(values) - 1) // 2
-        return values[midpoint]
+        return sum(values) / len(values)
 
     def format_hour_label(self, hour):
         suffix = "AM" if hour < 12 else "PM"
@@ -3200,7 +3198,7 @@ try {{
 
     def get_hourly_rain_averages(self):
         return [
-            self.get_typical_hourly_value(values)
+            self.get_average_hourly_value(values)
             for values in self.get_hourly_rain_values()
         ]
 
@@ -3216,7 +3214,7 @@ try {{
 
         ctk.CTkLabel(
             card,
-            text="TYPICAL RAIN COLLECTED BY HOUR",
+            text="AVERAGE RAIN COLLECTED BY HOUR",
             text_color=COLORS["red2"],
             font=ctk.CTkFont(family="Impact", size=26),
         ).pack(anchor="w", padx=26, pady=(18, 10))
