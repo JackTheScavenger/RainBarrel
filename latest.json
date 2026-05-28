@@ -1,6 +1,6 @@
 {
-  "version": "1.1.21",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.21/RainBarrel.exe",
-  "sha256": "87fec38ecbb7ec9b7bd9c8d98e5ffca4afbdfd6f96b008d996d75027a4b95c1f",
-  "notes": "Rejected Join Rain prompt text in result tracking and require result-only wording before saving rain results."
+  "version": "1.1.22",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.22/RainBarrel.exe",
+  "sha256": "9e35e8c661a1fa901331a10cee8619368086a4f46ff8a31a9ac9c3d6d733de5b",
+  "notes": "Changed the hourly rain graph to use true averages so every logged rain result is included instead of only typical values."
 }
