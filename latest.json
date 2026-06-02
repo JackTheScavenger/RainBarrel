@@ -1,6 +1,6 @@
 {
-  "version": "1.1.22",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.1.22/RainBarrel.exe",
-  "sha256": "9e35e8c661a1fa901331a10cee8619368086a4f46ff8a31a9ac9c3d6d733de5b",
-  "notes": "Changed the hourly rain graph to use true averages so every logged rain result is included instead of only typical values."
+  "version": "1.2",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.2/RainBarrel.exe",
+  "sha256": "8c852e044c357538f7560fe11cb2c9e751db32d1b68770f27c1f7e6ad0b69143",
+  "notes": "Migrated to the new Qt interface with built-in browser support, mini mode, browser-text rain stat tracking, predicted rain rewards, prediction-based collection filtering, saved Weather Station state, and updated rain UI assets."
 }

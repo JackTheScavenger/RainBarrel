@@ -81,7 +81,7 @@ runtime_binaries = collect_existing_binaries(
 
 
 a = Analysis(
-    ['main.py'],
+    ['qt_main.py'],
     pathex=[],
     binaries=runtime_binaries + [
         (os.path.join(python_dlls, '_tkinter.pyd'), '.'),
@@ -96,6 +96,10 @@ a = Analysis(
         ('100 % off .png', '.'),
         ('Rain amount.png', '.'),
         ('Rain results.png', '.'),
+        ('Scrap.png', '.'),
+        ('Barrel No Flow.png', '.'),
+        ('Barrel Drip.gif', '.'),
+        ('Barrel Flowing.gif', '.'),
         ('rain_alert.wav', '.'),
         (os.path.join(python_root, 'Lib', 'tkinter'), 'tkinter'),
         (os.path.join(python_tcl, 'tcl8.6'), '_tcl_data'),
