@@ -65,6 +65,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QGridLayout,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -88,7 +89,7 @@ from shiboken6 import isValid
 
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
 BANDIT_CAMP_URL = "https://bandit.camp/"
 RAIN_REWARD_HISTORY_LIMIT = 100
 DEFAULT_CONFIDENCE_PERCENT = 65
@@ -2775,6 +2776,13 @@ class MainWindow(QMainWindow):
         mini_bar = QFrame()
         mini_bar.setObjectName("MiniBar")
         mini_bar.setFixedHeight(52)
+        mini_bar.setProperty("rainActive", False)
+        glow = QGraphicsDropShadowEffect(mini_bar)
+        glow.setBlurRadius(20)
+        glow.setOffset(0, 0)
+        glow.setColor(QColor(226, 177, 47, 190))
+        glow.setEnabled(False)
+        mini_bar.setGraphicsEffect(glow)
 
         layout = QHBoxLayout(mini_bar)
         layout.setContentsMargins(8, 4, 8, 4)
@@ -3612,6 +3620,13 @@ class MainWindow(QMainWindow):
             self.logo_button.set_rain_active(active)
         if self.mini_logo_button is not None and widget_is_alive(self.mini_logo_button):
             self.mini_logo_button.set_rain_active(active)
+        if self.mini_bar is not None and widget_is_alive(self.mini_bar):
+            self.mini_bar.setProperty("rainActive", active)
+            effect = self.mini_bar.graphicsEffect()
+            if effect is not None:
+                effect.setEnabled(active)
+            self.mini_bar.style().unpolish(self.mini_bar)
+            self.mini_bar.style().polish(self.mini_bar)
         self.refresh_mini_stats_labels()
 
     def get_total_search_time_seconds(self):
@@ -4676,6 +4691,11 @@ def apply_styles(app):
         #MiniBar {{
             background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #171a15, stop:0.55 #0c100c, stop:1 #171814);
             border: none;
+        }}
+        #MiniBar[rainActive="true"] {{
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #241807, stop:0.52 #111109, stop:1 #241807);
+            border: 2px solid {COLORS["gold"]};
+            border-radius: 6px;
         }}
         #MiniTitle {{
             color: {COLORS["red2"]};
