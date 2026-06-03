@@ -1,6 +1,6 @@
 {
-  "version": "1.2",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.2/RainBarrel.exe",
-  "sha256": "8c852e044c357538f7560fe11cb2c9e751db32d1b68770f27c1f7e6ad0b69143",
-  "notes": "Migrated to the new Qt interface with built-in browser support, mini mode, browser-text rain stat tracking, predicted rain rewards, prediction-based collection filtering, saved Weather Station state, and updated rain UI assets."
+  "version": "1.2.1",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.2.1/RainBarrel.exe",
+  "sha256": "31364596d57b69f2bed28ee9076f829537e726f107120abd3ce0599be7721755",
+  "notes": "Fixed mini-mode Weather Station notifications, added launch update prompts, improved Weather Station rain detection diagnostics, hid predicted rain values outside active rains, updated mini barrel rain states, fixed mini window positioning and full-mode pin behavior, and made prediction-filtered joins wait until near the end of the rain."
 }

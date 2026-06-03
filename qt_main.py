@@ -6,8 +6,10 @@ import random
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import urllib.request
 from datetime import datetime
 from importlib.util import find_spec
 from pathlib import Path
@@ -53,7 +55,7 @@ restart_with_project_venv_if_needed()
 
 import main as legacy
 from PySide6.QtCharts import QBarCategoryAxis, QBarSeries, QBarSet, QChart, QChartView, QValueAxis
-from PySide6.QtCore import QObject, QMargins, QSize, Qt, QTime, QTimer, QUrl, Signal
+from PySide6.QtCore import QObject, QMargins, QPoint, QSize, Qt, QTime, QTimer, QUrl, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QMovie, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -66,7 +68,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMessageBox,
     QPushButton,
+    QProgressDialog,
     QScrollArea,
     QSlider,
     QSpinBox,
@@ -84,7 +88,7 @@ from shiboken6 import isValid
 
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.2"
+APP_VERSION = "1.2.1"
 BANDIT_CAMP_URL = "https://bandit.camp/"
 RAIN_REWARD_HISTORY_LIMIT = 100
 DEFAULT_CONFIDENCE_PERCENT = 65
@@ -96,6 +100,7 @@ DEFAULT_RAIN_COLLECT_END_TIME = "23:59"
 DEFAULT_RAIN_COLLECT_CHANCE = 100
 DEFAULT_RAIN_MIN_PREDICTION_ENABLED = False
 DEFAULT_RAIN_MIN_PREDICTED_REWARD = 0.0
+DEFAULT_RAIN_PREDICTION_JOIN_WINDOW_SECONDS = 45
 DEFAULT_RAIN_AUTO_ACTIVATE = False
 DEFAULT_WEATHER_STATION_INTERVAL = 15
 DEFAULT_WEATHER_NOTIFICATION_VOLUME = 100
@@ -265,6 +270,22 @@ def parse_rain_people_from_page_text(text):
         if value > 0:
             return value
     return None
+
+
+def parse_rain_countdown_from_page_text(text):
+    if not text:
+        return None
+
+    match = re.search(r"(?<!\d)(?:(\d{1,2}):)?([0-5]?\d):([0-5]\d)(?!\d)", str(text))
+    if not match:
+        return None
+
+    try:
+        if match.group(1) is not None:
+            return int(match.group(1)) * 3600 + int(match.group(2)) * 60 + int(match.group(3))
+        return int(match.group(2)) * 60 + int(match.group(3))
+    except ValueError:
+        return None
 
 
 def predict_rain_reward_from_history(history, current_tipped, current_people):
@@ -778,7 +799,13 @@ class ActivityToggleButton(QPushButton):
 
 
 class BarrelLogoButton(QPushButton):
-    def __init__(self, click_callback):
+    def __init__(
+        self,
+        click_callback,
+        fixed_size=QSize(128, 52),
+        icon_size=QSize(122, 50),
+        hover_drip=True,
+    ):
         super().__init__()
         self.idle_pixmap = QPixmap(legacy.resource_path("Barrel No Flow.png"))
         self.drip_movie = QMovie(legacy.resource_path("Barrel Drip.gif"))
@@ -786,11 +813,12 @@ class BarrelLogoButton(QPushButton):
         self.current_movie = None
         self.rain_active = False
         self.hovered = False
+        self.hover_drip = bool(hover_drip)
 
         self.setObjectName("LogoButton")
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedSize(128, 52)
-        self.setIconSize(QSize(122, 50))
+        self.setFixedSize(fixed_size)
+        self.setIconSize(icon_size)
         self.clicked.connect(lambda checked=False: click_callback())
         self.drip_movie.frameChanged.connect(lambda frame=0: self.update_movie_icon(self.drip_movie))
         self.flow_movie.frameChanged.connect(lambda frame=0: self.update_movie_icon(self.flow_movie))
@@ -835,7 +863,7 @@ class BarrelLogoButton(QPushButton):
         if self.rain_active:
             self.set_movie(self.flow_movie)
             return
-        if self.hovered:
+        if self.hovered and self.hover_drip:
             self.set_movie(self.drip_movie)
             return
         self.stop_current_movie()
@@ -1137,6 +1165,7 @@ class MainWindow(QMainWindow):
 
         self.nav_buttons = {}
         self.logo_button = None
+        self.mini_logo_button = None
         self.rain_page_button = None
         self.rain_status_button = None
         self.battle_status_button = None
@@ -1152,6 +1181,9 @@ class MainWindow(QMainWindow):
         self.full_mode_geometry = None
         self.full_mode_was_maximized = False
         self.developer_mode = False
+        self.update_check_in_progress = False
+        self.update_download_in_progress = False
+        self.update_progress_dialog = None
         self.pages = QStackedWidget()
 
         self.rain_page = RainPage()
@@ -1183,6 +1215,7 @@ class MainWindow(QMainWindow):
         self.build_rain_settings_page()
         self.restore_saved_weather_station_state()
         self.show_page("Browser")
+        QTimer.singleShot(1500, self.check_for_updates_on_startup)
         self.sync_rain_running_state()
         self.sync_battle_running_state()
         self.sync_barrel_logo_state()
@@ -1440,7 +1473,8 @@ class MainWindow(QMainWindow):
         return count
 
     def refresh_rain_prediction_labels(self):
-        if self.pending_rain_prediction:
+        rain_active = self.rain_event_visually_active()
+        if rain_active and self.pending_rain_prediction:
             prediction = self.pending_rain_prediction
             estimate = prediction["estimate"]
             low = prediction["low"]
@@ -1460,10 +1494,9 @@ class MainWindow(QMainWindow):
                 f"using {used_count}/{sample_count} prior rains"
             )
         else:
-            value_text = "Expected Reward: --"
-            sample_count = self.get_prediction_sample_count()
-            detail_text = "Waiting for current rain tip and joined count."
-            context_text = f"Using {sample_count} previous rains with tips."
+            value_text = ""
+            detail_text = ""
+            context_text = ""
 
         if widget_is_alive(self.rain_prediction_value_label):
             self.rain_prediction_value_label.setText(value_text)
@@ -1475,18 +1508,20 @@ class MainWindow(QMainWindow):
         self.refresh_mini_stats_labels()
 
     def get_mini_prediction_text(self):
-        if not self.pending_rain_prediction:
-            return "PREDICTED RAIN --"
+        if not self.rain_event_visually_active() or not self.pending_rain_prediction:
+            return ""
         estimate = self.pending_rain_prediction.get("estimate")
         if estimate is None:
-            return "PREDICTED RAIN --"
+            return ""
         return f"PREDICTED RAIN {format_rain_amount(estimate)}"
 
     def refresh_mini_stats_labels(self):
         if widget_is_alive(self.mini_total_label):
             self.mini_total_label.setText(self.get_total_text())
         if widget_is_alive(self.mini_prediction_label):
-            self.mini_prediction_label.setText(self.get_mini_prediction_text())
+            text = self.get_mini_prediction_text()
+            self.mini_prediction_label.setText(text)
+            self.mini_prediction_label.setVisible(bool(text))
 
     def update_rain_reward_prediction(self, tipped, people):
         prediction = predict_rain_reward_from_history(self.rain_result_history, tipped, people)
@@ -1656,11 +1691,11 @@ class MainWindow(QMainWindow):
     def read_rain_tip_context_from_browser_page(self):
         payload, detail = self.read_browser_rain_snapshot()
         if payload is None:
-            return None, None, detail
+            return None, None, None, detail
 
         candidates = payload.get("tipCandidates", [])
         if not isinstance(candidates, list) or not candidates:
-            return None, None, "Built-in browser rain tip panel not found"
+            return None, None, None, "Built-in browser rain tip panel not found"
 
         previews = []
         for candidate in candidates:
@@ -1668,13 +1703,17 @@ class MainWindow(QMainWindow):
             previews.append(legacy.compact_ocr_preview(text, 100))
             amount = parse_rain_tip_from_page_text(text)
             people = parse_rain_people_from_page_text(text)
+            remaining = parse_rain_countdown_from_page_text(text)
             if amount is not None:
                 detail = f"Read rain tip amount from browser page: {amount:.2f} scrap"
                 if people is not None:
                     detail += f" with {people} people joined"
-                return round(float(amount), 2), people, detail
+                if remaining is not None:
+                    detail += f" and {remaining}s remaining"
+                return round(float(amount), 2), people, remaining, detail
 
         return (
+            None,
             None,
             None,
             "Built-in browser rain tip panel found but amount was not parsed "
@@ -1682,7 +1721,7 @@ class MainWindow(QMainWindow):
         )
 
     def read_rain_tip_amount_from_browser_page(self):
-        amount, people, detail = self.read_rain_tip_context_from_browser_page()
+        amount, people, remaining, detail = self.read_rain_tip_context_from_browser_page()
         return amount, detail
 
     def read_rain_reward_amount_from_browser_page(self):
@@ -1749,7 +1788,7 @@ class MainWindow(QMainWindow):
 
         try:
             while time.time() < self.get_rain_tracking_watch_until() and run_id == self.rain_tip_tracker_run_id:
-                amount, people, detail = self.read_rain_tip_context_from_browser_page()
+                amount, people, _remaining, detail = self.read_rain_tip_context_from_browser_page()
 
                 if amount is not None:
                     tipped = round(float(amount), 2)
@@ -2073,11 +2112,18 @@ class MainWindow(QMainWindow):
 
     def play_weather_notification_sound(self):
         volume = self.get_weather_notification_volume()
+        self.log_rain(f"Weather station: playing rain alert sound at {volume}% volume")
         threading.Thread(
-            target=legacy.play_rain_alert_sound,
+            target=self.play_weather_notification_sound_worker,
             args=(volume,),
             daemon=True,
         ).start()
+
+    def play_weather_notification_sound_worker(self, volume):
+        try:
+            legacy.play_rain_alert_sound(volume)
+        except Exception as e:
+            self.bridge.log.emit(f"Weather station alert sound failed: {e.__class__.__name__}: {e}")
 
     def schedule_weather_volume_preview(self):
         if widget_is_alive(self.weather_volume_spin):
@@ -2186,6 +2232,7 @@ class MainWindow(QMainWindow):
         script = """
             (() => {
                 const norm = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+                const allowHiddenScan = __ALLOW_HIDDEN_SCAN__;
                 const isVisible = (element) => {
                     if (!element || !element.getBoundingClientRect) {
                         return false;
@@ -2204,7 +2251,20 @@ class MainWindow(QMainWindow):
                         rect.left <= window.innerWidth
                     );
                 };
+                const canReadElement = (element) => allowHiddenScan || isVisible(element);
                 const buttonMarkers = ["join rain event", "claim rain", "collect rain"];
+                const looksLikeRainText = (text) => {
+                    const lower = String(text || "").toLowerCase();
+                    const hasTitle = lower.includes("rakeback rain");
+                    const hasAction = buttonMarkers.some((marker) => lower.includes(marker));
+                    const hasBody = (
+                        lower.includes("rain tips") ||
+                        lower.includes("free scrap") ||
+                        lower.includes("join now") ||
+                        lower.includes("play amount")
+                    );
+                    return hasTitle && hasAction && hasBody;
+                };
                 const selector = [
                     "button",
                     "a",
@@ -2215,8 +2275,21 @@ class MainWindow(QMainWindow):
                     "span"
                 ].join(",");
                 const candidates = [];
+                const seenText = new Set();
+                const pushCandidate = (buttonText, panelText, source) => {
+                    const text = norm(panelText).slice(0, 1200);
+                    if (!text || seenText.has(text)) {
+                        return;
+                    }
+                    seenText.add(text);
+                    candidates.push({
+                        buttonText: norm(buttonText),
+                        text,
+                        source
+                    });
+                };
                 for (const element of Array.from(document.querySelectorAll(selector))) {
-                    if (!isVisible(element)) {
+                    if (!canReadElement(element)) {
                         continue;
                     }
                     const buttonText = norm(element.innerText || element.textContent);
@@ -2230,7 +2303,7 @@ class MainWindow(QMainWindow):
 
                     let node = element;
                     for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
-                        if (!isVisible(node)) {
+                        if (!canReadElement(node)) {
                             continue;
                         }
                         const panelText = norm(node.innerText || node.textContent);
@@ -2243,12 +2316,39 @@ class MainWindow(QMainWindow):
                             lower.includes("play amount")
                         );
                         if (hasTitle && hasBody) {
-                            candidates.push({
-                                buttonText,
-                                text: panelText.slice(0, 1200)
-                            });
+                            pushCandidate(buttonText, panelText, "button-parent");
                             break;
                         }
+                    }
+                }
+                if (!candidates.length) {
+                    const panelSelector = [
+                        "[class*='rain']",
+                        "[class*='Rain']",
+                        "[class*='chat']",
+                        "[class*='Chat']",
+                        "div",
+                        "section",
+                        "article"
+                    ].join(",");
+                    for (const element of Array.from(document.querySelectorAll(panelSelector))) {
+                        if (!canReadElement(element)) {
+                            continue;
+                        }
+                        const text = norm(element.innerText || element.textContent);
+                        if (text.length > 1800 || !looksLikeRainText(text)) {
+                            continue;
+                        }
+                        const button = Array.from(element.querySelectorAll("button, a, [role='button']"))
+                            .find((child) => canReadElement(child) && buttonMarkers.some(
+                                (marker) => norm(child.innerText || child.textContent).toLowerCase().includes(marker)
+                            ));
+                        pushCandidate(
+                            button ? norm(button.innerText || button.textContent) : "JOIN RAIN EVENT",
+                            text,
+                            "visible-panel"
+                        );
+                        break;
                     }
                 }
 
@@ -2260,10 +2360,12 @@ class MainWindow(QMainWindow):
                     active: candidates.length > 0,
                     buttonText: candidates.length ? candidates[0].buttonText : "",
                     rainText: candidates.length ? candidates[0].text : "",
+                    source: candidates.length ? candidates[0].source : "",
+                    hiddenScan: allowHiddenScan,
                     candidateCount: candidates.length
                 });
             })()
-        """
+        """.replace("__ALLOW_HIDDEN_SCAN__", "true" if self.mini_mode else "false")
         try:
             self.browser_page.page.runJavaScript(
                 script,
@@ -2299,6 +2401,8 @@ class MainWindow(QMainWindow):
         page_text = str(payload.get("text", ""))
         rain_text = str(payload.get("rainText", ""))
         button_text = str(payload.get("buttonText", ""))
+        source = str(payload.get("source", ""))
+        hidden_scan = bool(payload.get("hiddenScan"))
         candidate_count = int(payload.get("candidateCount", 0) or 0)
         page_lower = page_text.lower()
 
@@ -2314,9 +2418,16 @@ class MainWindow(QMainWindow):
             state = True
             tip_amount = parse_rain_tip_from_page_text(rain_text)
             people_joined = parse_rain_people_from_page_text(rain_text)
+            remaining = parse_rain_countdown_from_page_text(rain_text)
             parts = ["Rain active in visible Rakeback Rain panel"]
+            if hidden_scan:
+                parts[0] = "Rain active in browser DOM while mini mode is hiding browser view"
+            if source:
+                parts.append(f"source {source}")
             if button_text:
                 parts.append(f"button {button_text}")
+            if remaining is not None:
+                parts.append(f"{remaining}s remaining")
             if tip_amount is not None:
                 with self.rain_tracking_lock:
                     self.pending_rain_total_tipped = round(float(tip_amount), 2)
@@ -2332,7 +2443,10 @@ class MainWindow(QMainWindow):
                 self.update_rain_reward_prediction(tip_amount, people_joined)
             detail = " | ".join(parts)
             weather_cooldown = self.get_weather_rain_found_cooldown_seconds()
-            notification_key = f"built_in_page_rain:{int(time.time() // weather_cooldown)}"
+            if remaining is not None:
+                notification_key = f"built_in_page_rain_end:{int((time.time() + remaining) // 30)}"
+            else:
+                notification_key = f"built_in_page_rain:{int(time.time() // weather_cooldown)}"
         else:
             state = False
             detail = f"No visible active Rakeback Rain join button found (candidates {candidate_count})"
@@ -2374,7 +2488,6 @@ class MainWindow(QMainWindow):
         )
 
     def report_weather_station_result(self, state, detail, notification_key=None):
-        was_active = self.weather_station_last_state is True
         timestamp = legacy.format_time_12h()
         if state is True:
             status = f"Rain active as of {timestamp}"
@@ -2391,14 +2504,19 @@ class MainWindow(QMainWindow):
             self.log_rain(f"Weather station: {detail}")
         if state is not True:
             self.weather_station_active_rain_notified = False
-        if state is True and not was_active and not self.weather_station_active_rain_notified:
+        if (
+            state is True
+            and notification_key is not None
+            and notification_key != self.last_weather_notification_key
+        ):
             self.record_rain_detected("weather station")
             self.start_rain_trackers("weather station")
             self.total_weather_notifications += 1
             self.current_weather_session_notifications += 1
             self.weather_station_active_rain_notified = True
-            self.last_weather_notification_key = notification_key or f"weather_active:{int(time.time())}"
+            self.last_weather_notification_key = notification_key
             self.save_stats()
+            self.log_rain(f"Weather station: rain alert triggered ({notification_key})")
             self.play_weather_notification_sound()
 
     def weather_station_worker(self, run_id):
@@ -2662,9 +2780,14 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(6)
 
-        title = QLabel("RB")
-        title.setObjectName("MiniTitle")
-        layout.addWidget(title)
+        self.mini_logo_button = BarrelLogoButton(
+            lambda: None,
+            fixed_size=QSize(48, 44),
+            icon_size=QSize(46, 42),
+            hover_drip=False,
+        )
+        self.mini_logo_button.setCursor(Qt.ArrowCursor)
+        layout.addWidget(self.mini_logo_button)
 
         mini_activity = QFrame()
         mini_activity.setObjectName("MiniActivityStack")
@@ -3353,8 +3476,9 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(360, 52)
         self.setMaximumSize(460, 52)
         self.resize(410, 52)
-        self.restore_mini_window_position()
+        self.apply_saved_mini_geometry()
         self.show()
+        QTimer.singleShot(0, self.apply_saved_mini_geometry)
         self.sync_rain_running_state()
         self.sync_battle_running_state()
         self.sync_mini_pin_state()
@@ -3368,7 +3492,7 @@ class MainWindow(QMainWindow):
         self.mini_mode = False
         geometry = self.geometry()
         self.setWindowFlag(Qt.FramelessWindowHint, False)
-        self.setWindowFlag(Qt.WindowStaysOnTopHint, self.mini_pinned)
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, False)
         self.setMaximumSize(16777215, 16777215)
         self.setMinimumSize(980, 620)
         self.mini_bar.hide()
@@ -3385,23 +3509,37 @@ class MainWindow(QMainWindow):
             self.resize(1280, 820)
             self.show()
 
-    def restore_mini_window_position(self):
+    def get_saved_mini_position(self):
         try:
             x = int(self.settings.get("mini_window_x"))
             y = int(self.settings.get("mini_window_y"))
         except (TypeError, ValueError):
+            return None
+        return QPoint(x, y)
+
+    def apply_saved_mini_geometry(self):
+        position = self.get_saved_mini_position()
+        if position is None:
             return
-        self.move(x, y)
+        self.setGeometry(position.x(), position.y(), self.width(), self.height())
+
+    def restore_mini_window_position(self):
+        position = self.get_saved_mini_position()
+        if position is None:
+            return
+        self.move(position)
 
     def save_mini_window_position(self):
         if not self.mini_mode:
             return
-        position = self.pos()
+        position = self.geometry().topLeft()
         self.settings["mini_window_x"] = int(position.x())
         self.settings["mini_window_y"] = int(position.y())
         self.save_data()
 
     def toggle_mini_pin(self):
+        if not self.mini_mode:
+            return
         self.mini_pinned = not self.mini_pinned
         geometry = self.geometry()
         self.setWindowFlag(Qt.WindowStaysOnTopHint, self.mini_pinned)
@@ -3469,8 +3607,12 @@ class MainWindow(QMainWindow):
         )
 
     def sync_barrel_logo_state(self):
+        active = self.rain_event_visually_active()
         if self.logo_button is not None and widget_is_alive(self.logo_button):
-            self.logo_button.set_rain_active(self.rain_event_visually_active())
+            self.logo_button.set_rain_active(active)
+        if self.mini_logo_button is not None and widget_is_alive(self.mini_logo_button):
+            self.mini_logo_button.set_rain_active(active)
+        self.refresh_mini_stats_labels()
 
     def get_total_search_time_seconds(self):
         if self.rain_running and self.current_session_started_at is not None:
@@ -3671,9 +3813,17 @@ class MainWindow(QMainWindow):
             return False, f"Skipped rain target image by collection chance ({self.get_rain_collect_chance():.0f}%)"
         if self.get_rain_min_prediction_enabled():
             threshold = self.get_rain_min_predicted_reward()
-            amount, people, detail = self.read_rain_tip_context_from_browser_page()
+            amount, people, remaining, detail = self.read_rain_tip_context_from_browser_page()
             if amount is None or people is None:
                 return False, f"Skipped rain target image by prediction filter ({detail})"
+            if remaining is None:
+                return False, "Skipped rain target image by prediction filter (rain countdown not readable yet)"
+            if remaining > DEFAULT_RAIN_PREDICTION_JOIN_WINDOW_SECONDS:
+                return (
+                    False,
+                    "Waiting to join rain until prediction is more accurate "
+                    f"({remaining}s remaining, target <= {DEFAULT_RAIN_PREDICTION_JOIN_WINDOW_SECONDS}s)",
+                )
 
             prediction = predict_rain_reward_from_history(self.rain_result_history, amount, people)
             self.ui_call(lambda tipped=amount, people=int(people): self.update_rain_reward_prediction(tipped, people))
@@ -4024,8 +4174,8 @@ class MainWindow(QMainWindow):
     def refresh_data(self):
         self.enforce_rain_auto_activation()
         self.total_label.setText(self.get_total_text())
-        self.refresh_mini_stats_labels()
         self.sync_barrel_logo_state()
+        self.refresh_rain_prediction_labels()
         if self.pages.currentWidget() is self.stats_page:
             stats = self.get_current_stats()
             if not self.stats_page.refresh_stats(stats):
@@ -4165,10 +4315,318 @@ class MainWindow(QMainWindow):
         self.log_stats(f"Stats imported from {path}")
         self.reload_stats_if_visible()
 
+    # ================= UPDATES =================
+
+    def updates_are_configured(self):
+        manifest_url = getattr(legacy, "UPDATE_MANIFEST_URL", "")
+        return manifest_url.startswith("https://") and "YOUR_GITHUB_USERNAME" not in manifest_url
+
+    def check_for_updates_on_startup(self):
+        if self.updates_are_configured():
+            self.check_for_updates(silent=True)
+
+    def check_for_updates(self, silent=False):
+        if self.update_check_in_progress or self.update_download_in_progress:
+            return
+        if not self.updates_are_configured():
+            if not silent:
+                self.show_update_message("Updates are not configured.")
+            return
+
+        self.update_check_in_progress = True
+        if not silent:
+            self.show_update_message("Checking for updates...")
+        threading.Thread(target=self.update_check_worker, args=(silent,), daemon=True).start()
+
+    def update_check_worker(self, silent):
+        try:
+            manifest_url = legacy.UPDATE_MANIFEST_URL
+            separator = "&" if "?" in manifest_url else "?"
+            manifest_url = f"{manifest_url}{separator}_={int(time.time())}"
+            request = urllib.request.Request(
+                manifest_url,
+                headers={
+                    "User-Agent": f"{APP_NAME}/{APP_VERSION}",
+                    "Cache-Control": "no-cache",
+                    "Pragma": "no-cache",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=legacy.UPDATE_CHECK_TIMEOUT_SECONDS) as response:
+                manifest = json.loads(response.read().decode("utf-8", errors="ignore"))
+
+            if not isinstance(manifest, dict):
+                raise ValueError("Update manifest is not a JSON object")
+
+            remote_version = str(manifest.get("version", "")).strip()
+            update_url = str(manifest.get("url", "")).strip()
+            if not remote_version or not update_url:
+                raise ValueError("Update manifest needs version and url")
+
+            if legacy.version_is_newer(remote_version, APP_VERSION):
+                self.ui_call(lambda data=manifest: self.prompt_update_available(data))
+            elif not silent:
+                self.ui_call(
+                    lambda version=remote_version: self.show_update_message(
+                        f"RainBarrel is up to date ({APP_VERSION}). Latest manifest is {version}."
+                    )
+                )
+        except Exception as e:
+            if not silent:
+                self.ui_call(lambda error=e: self.show_update_message(f"Update check failed: {error}"))
+            else:
+                self.ui_call(lambda error=e: self.log_event("Update", f"Update check failed: {error}"))
+        finally:
+            self.ui_call(self.finish_update_check)
+
+    def finish_update_check(self):
+        self.update_check_in_progress = False
+
+    def show_update_message(self, message):
+        self.log_event("Update", message)
+
+    def prompt_update_available(self, manifest):
+        if self.update_download_in_progress:
+            return
+
+        version = str(manifest.get("version", "")).strip()
+        notes = str(manifest.get("notes", "")).strip() or "No update notes were provided."
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Update Available")
+        dialog.setIcon(QMessageBox.Icon.Information)
+        dialog.setText(f"Version {version} is available.")
+        dialog.setInformativeText(
+            f"You are running {APP_VERSION}.\n\n{notes}\n\nWould you like to update now?"
+        )
+        dialog.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        dialog.setDefaultButton(QMessageBox.StandardButton.Yes)
+        answer = dialog.exec()
+        if answer != QMessageBox.StandardButton.Yes:
+            self.show_update_message(f"Update {version} postponed.")
+            return
+
+        if not getattr(sys, "frozen", False):
+            QMessageBox.information(
+                self,
+                "Update Available",
+                "Automatic install only works when running the built RainBarrel.exe.",
+            )
+            self.show_update_message(
+                f"Update {version} is available, but automatic install requires the built exe."
+            )
+            return
+
+        self.begin_update_download(manifest)
+
+    def begin_update_download(self, manifest):
+        if self.update_download_in_progress:
+            return
+
+        self.update_download_in_progress = True
+        self.update_progress_dialog = QProgressDialog("Downloading update...", None, 0, 100, self)
+        self.update_progress_dialog.setWindowTitle("RainBarrel Update")
+        self.update_progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.update_progress_dialog.setMinimumDuration(0)
+        self.update_progress_dialog.setValue(0)
+        self.update_progress_dialog.show()
+        self.show_update_message("Downloading update...")
+
+        threading.Thread(target=self.update_download_worker, args=(manifest,), daemon=True).start()
+
+    def update_download_worker(self, manifest):
+        try:
+            update_url = str(manifest.get("url", "")).strip()
+            expected_hash = str(manifest.get("sha256", "")).strip().lower()
+            version = str(manifest.get("version", "")).strip()
+
+            updates_dir = os.path.join(tempfile.gettempdir(), APP_NAME, "updates")
+            os.makedirs(updates_dir, exist_ok=True)
+            downloaded_path = os.path.join(updates_dir, f"{APP_NAME}-{version}.exe")
+
+            request = urllib.request.Request(
+                update_url,
+                headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"},
+            )
+            with urllib.request.urlopen(request, timeout=legacy.UPDATE_DOWNLOAD_TIMEOUT_SECONDS) as response:
+                total_size = response.headers.get("Content-Length")
+                try:
+                    total_size = int(total_size) if total_size else None
+                except ValueError:
+                    total_size = None
+
+                downloaded_size = 0
+                with open(downloaded_path, "wb") as file:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        file.write(chunk)
+                        downloaded_size += len(chunk)
+                        self.ui_call(
+                            lambda done=downloaded_size, total=total_size: self.report_update_download_progress(
+                                done,
+                                total,
+                            )
+                        )
+
+            if expected_hash:
+                self.ui_call(lambda: self.show_update_message("Verifying update..."))
+                actual_hash = legacy.sha256_file(downloaded_path).lower()
+                if actual_hash != expected_hash:
+                    raise ValueError("Downloaded update did not match the expected SHA256 hash")
+
+            self.ui_call(lambda: self.show_update_message("Preparing installer..."))
+            self.ui_call(lambda path=downloaded_path: self.try_install_downloaded_update(path))
+        except Exception as e:
+            self.ui_call(lambda error=e: self.finish_failed_update(f"Update failed: {error}"))
+
+    def report_update_download_progress(self, downloaded_size, total_size):
+        if total_size:
+            percent = min(max(downloaded_size / total_size, 0.0), 1.0)
+            downloaded_mb = downloaded_size / (1024 * 1024)
+            total_mb = total_size / (1024 * 1024)
+            text = f"Downloading update... {percent * 100:.0f}% ({downloaded_mb:.1f}/{total_mb:.1f} MB)"
+            value = int(percent * 100)
+        else:
+            downloaded_mb = downloaded_size / (1024 * 1024)
+            text = f"Downloading update... {downloaded_mb:.1f} MB"
+            value = 0
+
+        if self.update_progress_dialog is not None:
+            self.update_progress_dialog.setLabelText(text)
+            self.update_progress_dialog.setValue(value)
+        self.show_update_message(text)
+
+    def finish_failed_update(self, message):
+        self.update_download_in_progress = False
+        if self.update_progress_dialog is not None:
+            self.update_progress_dialog.close()
+            self.update_progress_dialog = None
+        self.show_update_message(message)
+        QMessageBox.warning(self, "Update Failed", message)
+
+    def try_install_downloaded_update(self, downloaded_path):
+        try:
+            self.install_downloaded_update(downloaded_path)
+        except Exception as e:
+            self.finish_failed_update(f"Could not prepare installer: {e}")
+
+    def install_downloaded_update(self, downloaded_path):
+        target_path = sys.executable
+        target_dir = os.path.dirname(target_path)
+        if not os.access(target_dir, os.W_OK):
+            self.finish_failed_update(
+                "Update downloaded, but this folder is not writable. Move RainBarrel somewhere writable and try again."
+            )
+            return
+
+        script_path = os.path.join(tempfile.gettempdir(), APP_NAME, "install_update.ps1")
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$processId = {os.getpid()}
+$targetPath = {legacy.powershell_quote(target_path)}
+$targetDir = Split-Path -Parent $targetPath
+$downloadedPath = {legacy.powershell_quote(downloaded_path)}
+$backupPath = "$targetPath.bak"
+$logPath = Join-Path (Split-Path -Parent $PSCommandPath) 'update.log'
+
+function Write-UpdateLog($message) {{
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    Add-Content -LiteralPath $logPath -Value "[$timestamp] $message"
+}}
+
+function Invoke-WithRetry($description, [scriptblock]$action) {{
+    for ($attempt = 1; $attempt -le 20; $attempt++) {{
+        try {{
+            & $action
+            return
+        }} catch {{
+            if ($attempt -eq 20) {{
+                throw
+            }}
+            Write-UpdateLog "$description failed on attempt ${{attempt}}: $($_.Exception.Message)"
+            Start-Sleep -Milliseconds 500
+        }}
+    }}
+}}
+
+try {{
+    Write-UpdateLog "Updater started"
+    $deadline = (Get-Date).AddSeconds(20)
+    while ((Get-Process -Id $processId -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)) {{
+        Start-Sleep -Milliseconds 250
+    }}
+    if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {{
+        Write-UpdateLog "Old app process $processId did not exit; stopping it"
+        Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+    }}
+    if (Test-Path -LiteralPath $backupPath) {{
+        Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+    }}
+    if (Test-Path -LiteralPath $targetPath) {{
+        Invoke-WithRetry "Backing up current exe" {{ Move-Item -LiteralPath $targetPath -Destination $backupPath -Force }}
+    }}
+    Invoke-WithRetry "Installing downloaded exe" {{ Move-Item -LiteralPath $downloadedPath -Destination $targetPath -Force }}
+
+    $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
+    Get-ChildItem Env:_PYI_* -ErrorAction SilentlyContinue | Remove-Item -ErrorAction SilentlyContinue
+    $ie4uinitPath = Join-Path (Join-Path $env:SystemRoot 'System32') 'ie4uinit.exe'
+    if (Test-Path -LiteralPath $ie4uinitPath) {{
+        Start-Process -FilePath $ie4uinitPath -ArgumentList '-show' -WindowStyle Hidden -ErrorAction SilentlyContinue
+    }}
+    Write-UpdateLog "Starting updated app"
+    $startedProcess = Start-Process -FilePath $targetPath -WorkingDirectory $targetDir -PassThru
+    Start-Sleep -Seconds 3
+    if ($startedProcess.HasExited) {{
+        Write-UpdateLog "Direct start exited with code $($startedProcess.ExitCode); trying explorer fallback"
+        Start-Process -FilePath 'explorer.exe' -ArgumentList $targetPath
+    }} else {{
+        Write-UpdateLog "Started process id $($startedProcess.Id)"
+    }}
+    Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+    Write-UpdateLog "Updater completed"
+    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+}} catch {{
+    Write-UpdateLog "Updater failed: $($_.Exception.Message)"
+    if ((Test-Path -LiteralPath $backupPath) -and -not (Test-Path -LiteralPath $targetPath)) {{
+        Move-Item -LiteralPath $backupPath -Destination $targetPath -Force -ErrorAction SilentlyContinue
+    }}
+}}
+"""
+
+        try:
+            os.makedirs(os.path.dirname(script_path), exist_ok=True)
+            with open(script_path, "w", encoding="utf-8") as file:
+                file.write(script)
+
+            flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+            subprocess.Popen(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    script_path,
+                ],
+                creationflags=flags,
+            )
+        except Exception as e:
+            self.finish_failed_update(f"Could not start updater: {e}")
+            return
+
+        if self.update_progress_dialog is not None:
+            self.update_progress_dialog.setLabelText("Installing update. RainBarrel will restart now...")
+            self.update_progress_dialog.setValue(100)
+        self.show_update_message("Installing update. RainBarrel will restart now...")
+        QTimer.singleShot(800, self.close)
+
     def open_bandit_website(self):
         self.show_page("Browser")
 
     def closeEvent(self, event):
+        if self.mini_mode:
+            self.save_mini_window_position()
         self.rain_running = False
         self.rain_run_id += 1
         self.rain_tip_tracker_active = False
