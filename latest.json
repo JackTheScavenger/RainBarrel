@@ -1,6 +1,6 @@
 {
-  "version": "1.2.2",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.2.2/RainBarrel.exe",
-  "sha256": "a39f20d183f82fd2af90ff6ae2ff178b2573dc6c40e45249ea97afc90b11c741",
-  "notes": "Added a yellow rain-active glow and border to mini mode so active rains stand out while the compact window is open."
+  "version": "1.2.3",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.2.3/RainBarrel.exe",
+  "sha256": "5440c8bbc0b1c17a51e8cca88128c7517f75d14155468c92fb939b77998e650e",
+  "notes": "Revamped the stats page with all-time and session summaries, fixed hourly chart rounding, suppressed duplicate Weather Station alerts for a single rain, removed mini Rain/Battles buttons, fixed the taskbar icon, and improved predicted rain display in full and mini modes."
 }

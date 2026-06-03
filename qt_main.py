@@ -89,11 +89,11 @@ from shiboken6 import isValid
 
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 BANDIT_CAMP_URL = "https://bandit.camp/"
 RAIN_REWARD_HISTORY_LIMIT = 100
-DEFAULT_CONFIDENCE_PERCENT = 65
-DEFAULT_RAIN_CLICKER_INTERVAL = 25
+DEFAULT_CONFIDENCE_PERCENT = 70
+DEFAULT_RAIN_CLICKER_INTERVAL = 15
 DEFAULT_MOVE_TIME = 1.5
 DEFAULT_RAIN_COLLECT_ANY_TIME = True
 DEFAULT_RAIN_COLLECT_START_TIME = "00:00"
@@ -101,9 +101,9 @@ DEFAULT_RAIN_COLLECT_END_TIME = "23:59"
 DEFAULT_RAIN_COLLECT_CHANCE = 100
 DEFAULT_RAIN_MIN_PREDICTION_ENABLED = False
 DEFAULT_RAIN_MIN_PREDICTED_REWARD = 0.0
-DEFAULT_RAIN_PREDICTION_JOIN_WINDOW_SECONDS = 45
+DEFAULT_RAIN_PREDICTION_JOIN_WINDOW_SECONDS = 30
 DEFAULT_RAIN_AUTO_ACTIVATE = False
-DEFAULT_WEATHER_STATION_INTERVAL = 15
+DEFAULT_WEATHER_STATION_INTERVAL = 5
 DEFAULT_WEATHER_NOTIFICATION_VOLUME = 100
 DEFAULT_POPUP_AFTER_RAIN_WAIT_SECONDS = 10
 DEFAULT_RAIN_FOUND_COOLDOWN_SECONDS = legacy.RAIN_FOUND_COOLDOWN_SECONDS
@@ -112,6 +112,11 @@ DEFAULT_WEATHER_RAIN_FOUND_COOLDOWN_SECONDS = legacy.WEATHER_RAIN_FOUND_COOLDOWN
 DEFAULT_RAIN_TIP_SCAN_INTERVAL_SECONDS = legacy.RAIN_TIP_SCAN_INTERVAL_SECONDS
 DEFAULT_RAIN_REWARD_SCAN_INTERVAL_SECONDS = legacy.RAIN_REWARD_SCAN_INTERVAL_SECONDS
 DEFAULT_RAIN_RESULT_SCAN_INTERVAL_SECONDS = legacy.RAIN_RESULT_SCAN_INTERVAL_SECONDS
+WEATHER_DUPLICATE_ALERT_SUPPRESS_SECONDS = 240
+
+
+def get_app_icon():
+    return QIcon(legacy.resource_path("app_icon.ico"))
 
 COLORS = {
     "bg": "#020302",
@@ -428,6 +433,29 @@ def get_hourly_rain_averages(reward_history):
         (sum(values) / len(values)) if values else None
         for values in hourly_values
     ]
+
+
+def get_rounded_chart_axis(max_value):
+    max_value = max(0.0, float(max_value or 0.0))
+    if max_value <= 0:
+        return 1.0, 6, "%.2f"
+
+    rough_step = max_value / 5
+    magnitude = 10 ** math.floor(math.log10(rough_step))
+    normalized = rough_step / magnitude
+    if normalized <= 1:
+        step = 1 * magnitude
+    elif normalized <= 2:
+        step = 2 * magnitude
+    elif normalized <= 5:
+        step = 5 * magnitude
+    else:
+        step = 10 * magnitude
+
+    axis_max = step * math.ceil(max_value / step)
+    tick_count = int(round(axis_max / step)) + 1
+    label_format = "%.0f" if step >= 1 else "%.2f"
+    return axis_max, max(2, min(tick_count, 11)), label_format
 
 
 def hour_label(hour):
@@ -978,55 +1006,35 @@ class StatsPage(QWidget):
         return True
 
     def get_stats_sections(self):
+        total_app_time = float(self.stats.get("total_app_open_time_seconds", 0.0) or 0.0)
         total_time = float(self.stats.get("total_search_time_seconds", 0.0) or 0.0)
+        total_weather_time = float(self.stats.get("total_weather_station_time_seconds", 0.0) or 0.0)
         total_collected = float(self.stats.get("total_rain_collected", 0.0) or 0.0)
-        average_per_hour = total_collected / (total_time / 3600) if total_time > 0 else 0.0
+        session_app_time = float(self.stats.get("current_app_session_seconds", 0.0) or 0.0)
+        session_rain_time = float(self.stats.get("current_session_seconds", 0.0) or 0.0)
+        session_weather_time = float(self.stats.get("current_weather_session_seconds", 0.0) or 0.0)
 
         return [
             (
-                "TOTAL RAIN STATS",
+                "ALL TIME",
                 [
-                    ("Total Active Time", format_duration(total_time)),
-                    ("Total Rains Clicked", str(int(self.stats.get("total_rains_clicked", 0) or 0))),
+                    ("Rain Barrel App Open Time", format_duration(total_app_time)),
+                    ("Rain Bot Active Time", format_duration(total_time)),
+                    ("Weather Station Active Time", format_duration(total_weather_time)),
                     ("Total Rain Collected", format_rain_amount(total_collected)),
-                    (
-                        "Total After-Click Popups Clicked",
-                        str(int(self.stats.get("total_after_rain_popups_clicked", 0) or 0)),
-                    ),
-                    ("Average Rain Per Hour", f"{format_rain_amount(average_per_hour)}/H"),
-                    ("Last Rain Reward", format_rain_amount(self.stats.get("last_rain_reward", 0.0))),
-                    ("Last Rain Detected", format_last_rain_detected(self.stats.get("last_rain_time", "--"))),
-                ],
-            ),
-            (
-                "CURRENT SESSION",
-                [
-                    ("Session Time", format_duration(float(self.stats.get("current_session_seconds", 0.0) or 0.0))),
-                    ("Session Rains Clicked", str(int(self.stats.get("current_session_rains_clicked", 0) or 0))),
-                    ("Session Rain Collected", format_rain_amount(self.stats.get("current_session_rain_collected", 0.0))),
-                ],
-            ),
-            (
-                "WEATHER STATION",
-                [
-                    (
-                        "Total Weather Station Time",
-                        format_duration(float(self.stats.get("total_weather_station_time_seconds", 0.0) or 0.0)),
-                    ),
                     ("Total Weather Notifications", str(int(self.stats.get("total_weather_notifications", 0) or 0))),
+                    ("Total Times Rain Collected", str(int(self.stats.get("total_rains_clicked", 0) or 0))),
                 ],
             ),
             (
-                "WEATHER SESSION",
+                "SESSION",
                 [
-                    (
-                        "Session Weather Time",
-                        format_duration(float(self.stats.get("current_weather_session_seconds", 0.0) or 0.0)),
-                    ),
-                    (
-                        "Session Weather Notifications",
-                        str(int(self.stats.get("current_weather_session_notifications", 0) or 0)),
-                    ),
+                    ("App Open Time", format_duration(session_app_time)),
+                    ("Rain Bot Active Time", format_duration(session_rain_time)),
+                    ("Weather Station Active Time", format_duration(session_weather_time)),
+                    ("Session Rain Collected", format_rain_amount(self.stats.get("current_session_rain_collected", 0.0))),
+                    ("Session Weather Notifications", str(int(self.stats.get("current_weather_session_notifications", 0) or 0))),
+                    ("Session Times Rain Collected", str(int(self.stats.get("current_session_rains_clicked", 0) or 0))),
                 ],
             ),
         ]
@@ -1132,7 +1140,10 @@ class StatsPage(QWidget):
 
         y_axis = QValueAxis()
         max_value = max(values) if values else 0
-        y_axis.setRange(0, max_value * 1.15 if max_value > 0 else 1)
+        axis_max, tick_count, label_format = get_rounded_chart_axis(max_value)
+        y_axis.setRange(0, axis_max)
+        y_axis.setTickCount(tick_count)
+        y_axis.setLabelFormat(label_format)
         y_axis.setLabelsColor(QColor(COLORS["muted"]))
         y_axis.setGridLineColor(QColor(COLORS["border"]))
         chart.addAxis(y_axis, Qt.AlignLeft)
@@ -1161,6 +1172,7 @@ class MainWindow(QMainWindow):
         self.weather_volume_preview_timer.timeout.connect(self.play_weather_volume_preview)
 
         self.setWindowTitle("Rain Barrel Qt")
+        self.setWindowIcon(get_app_icon())
         self.resize(1280, 820)
         self.setMinimumSize(980, 620)
 
@@ -1174,7 +1186,9 @@ class MainWindow(QMainWindow):
         self.mini_battle_status_button = None
         self.mini_pin_button = None
         self.mini_total_label = None
+        self.mini_prediction_title = None
         self.mini_prediction_label = None
+        self.top_prediction_label = None
         self.mini_mode = False
         self.mini_pinned = False
         self.mini_mode_normal_flags = self.windowFlags()
@@ -1241,6 +1255,7 @@ class MainWindow(QMainWindow):
         self.weather_station_check_pending = False
         self.weather_station_last_state = None
         self.weather_station_active_rain_notified = False
+        self.weather_station_last_alert_at = 0.0
         self.weather_station_status = "Weather station off"
         self.weather_station_started_at = None
         self.weather_station_next_check_at = None
@@ -1261,6 +1276,8 @@ class MainWindow(QMainWindow):
         self.rain_auto_last_stop_key = None
         self.rain_visual_active_until = 0
 
+        self.total_app_open_time_seconds = float(stats.get("total_app_open_time_seconds", 0.0) or 0.0)
+        self.current_app_session_started_at = time.time()
         self.total_search_time_seconds = float(stats.get("total_search_time_seconds", 0.0) or 0.0)
         self.total_rains_clicked = int(stats.get("total_rains_clicked", stats.get("click_count", 0)) or 0)
         self.total_rain_collected = float(stats.get("total_rain_collected", 0.0) or 0.0)
@@ -1508,13 +1525,21 @@ class MainWindow(QMainWindow):
             self.rain_prediction_context_label.setText(context_text)
         self.refresh_mini_stats_labels()
 
-    def get_mini_prediction_text(self):
+    def get_compact_prediction_text(self):
         if not self.rain_event_visually_active() or not self.pending_rain_prediction:
             return ""
         estimate = self.pending_rain_prediction.get("estimate")
         if estimate is None:
             return ""
         return f"PREDICTED RAIN {format_rain_amount(estimate)}"
+
+    def get_mini_prediction_text(self):
+        if not self.rain_event_visually_active() or not self.pending_rain_prediction:
+            return ""
+        estimate = self.pending_rain_prediction.get("estimate")
+        if estimate is None:
+            return ""
+        return format_rain_amount(estimate)
 
     def refresh_mini_stats_labels(self):
         if widget_is_alive(self.mini_total_label):
@@ -1523,6 +1548,12 @@ class MainWindow(QMainWindow):
             text = self.get_mini_prediction_text()
             self.mini_prediction_label.setText(text)
             self.mini_prediction_label.setVisible(bool(text))
+            if widget_is_alive(self.mini_prediction_title):
+                self.mini_prediction_title.setVisible(bool(text))
+        if widget_is_alive(self.top_prediction_label):
+            text = self.get_compact_prediction_text()
+            self.top_prediction_label.setText(text)
+            self.top_prediction_label.setVisible(bool(text))
 
     def update_rain_reward_prediction(self, tipped, people):
         prediction = predict_rain_reward_from_history(self.rain_result_history, tipped, people)
@@ -2168,6 +2199,7 @@ class MainWindow(QMainWindow):
         self.weather_station_check_pending = False
         self.weather_station_last_state = None
         self.weather_station_active_rain_notified = False
+        self.weather_station_last_alert_at = 0.0
         self.stop_weather_station_timer()
         driver = self.weather_station_driver
         self.weather_station_driver = None
@@ -2192,6 +2224,7 @@ class MainWindow(QMainWindow):
         self.weather_station_check_pending = False
         self.weather_station_last_state = None
         self.weather_station_active_rain_notified = False
+        self.weather_station_last_alert_at = 0.0
         self.stop_weather_station_timer()
         driver = self.weather_station_driver
         self.weather_station_driver = None
@@ -2207,6 +2240,7 @@ class MainWindow(QMainWindow):
 
     def start_weather_station(self):
         self.weather_station_last_state = None
+        self.weather_station_active_rain_notified = False
         self.browser_page.ensure_loaded()
         self.log_rain("Weather station using built-in browser page text")
         self.schedule_weather_station_check(0)
@@ -2489,6 +2523,7 @@ class MainWindow(QMainWindow):
         )
 
     def report_weather_station_result(self, state, detail, notification_key=None):
+        now = time.time()
         timestamp = legacy.format_time_12h()
         if state is True:
             status = f"Rain active as of {timestamp}"
@@ -2504,17 +2539,19 @@ class MainWindow(QMainWindow):
             self.weather_station_last_state = state
             self.log_rain(f"Weather station: {detail}")
         if state is not True:
-            self.weather_station_active_rain_notified = False
+            if now - float(self.weather_station_last_alert_at or 0.0) >= WEATHER_DUPLICATE_ALERT_SUPPRESS_SECONDS:
+                self.weather_station_active_rain_notified = False
         if (
             state is True
             and notification_key is not None
-            and notification_key != self.last_weather_notification_key
+            and not self.weather_station_active_rain_notified
         ):
             self.record_rain_detected("weather station")
             self.start_rain_trackers("weather station")
             self.total_weather_notifications += 1
             self.current_weather_session_notifications += 1
             self.weather_station_active_rain_notified = True
+            self.weather_station_last_alert_at = now
             self.last_weather_notification_key = notification_key
             self.save_stats()
             self.log_rain(f"Weather station: rain alert triggered ({notification_key})")
@@ -2716,6 +2753,10 @@ class MainWindow(QMainWindow):
             )
         layout.addWidget(scrap_icon)
         layout.addWidget(self.total_label)
+        self.top_prediction_label = QLabel("")
+        self.top_prediction_label.setObjectName("TopPredictionValue")
+        self.top_prediction_label.setVisible(False)
+        layout.addWidget(self.top_prediction_label)
         return pill
 
     def build_topbar(self):
@@ -2797,31 +2838,17 @@ class MainWindow(QMainWindow):
         self.mini_logo_button.setCursor(Qt.ArrowCursor)
         layout.addWidget(self.mini_logo_button)
 
-        mini_activity = QFrame()
-        mini_activity.setObjectName("MiniActivityStack")
-        mini_activity_layout = QVBoxLayout(mini_activity)
-        mini_activity_layout.setContentsMargins(0, 0, 0, 0)
-        mini_activity_layout.setSpacing(2)
-        self.mini_rain_status_button = ActivityToggleButton("RAIN", self.toggle_rain_ui)
-        self.mini_rain_status_button.setObjectName("MiniActivityButton")
-        self.mini_battle_status_button = ActivityToggleButton("BATTLES", self.toggle_battle_ui)
-        self.mini_battle_status_button.setObjectName("MiniActivityButton")
-        mini_activity_layout.addWidget(self.mini_rain_status_button)
-        mini_activity_layout.addWidget(self.mini_battle_status_button)
-        layout.addWidget(mini_activity)
-
         mini_stats = QFrame()
         mini_stats.setObjectName("MiniStats")
-        mini_stats_layout = QVBoxLayout(mini_stats)
+        mini_stats_layout = QGridLayout(mini_stats)
         mini_stats_layout.setContentsMargins(0, 0, 0, 0)
-        mini_stats_layout.setSpacing(0)
+        mini_stats_layout.setHorizontalSpacing(6)
+        mini_stats_layout.setVerticalSpacing(0)
+        mini_stats_layout.setColumnStretch(3, 1)
 
-        mini_session_row = QHBoxLayout()
-        mini_session_row.setContentsMargins(0, 0, 0, 0)
-        mini_session_row.setSpacing(4)
         mini_session_title = QLabel("SESSION")
         mini_session_title.setObjectName("MiniStatTitle")
-        mini_session_row.addWidget(mini_session_title)
+        mini_stats_layout.addWidget(mini_session_title, 0, 0, Qt.AlignRight | Qt.AlignVCenter)
         mini_scrap_icon = QLabel()
         mini_scrap_icon.setObjectName("MiniScrapIcon")
         mini_scrap_icon.setFixedSize(14, 14)
@@ -2832,16 +2859,19 @@ class MainWindow(QMainWindow):
             mini_scrap_icon.setPixmap(
                 pixmap.scaled(14, 14, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             )
-        mini_session_row.addWidget(mini_scrap_icon)
+        mini_stats_layout.addWidget(mini_scrap_icon, 0, 1, Qt.AlignCenter)
         self.mini_total_label = QLabel(self.get_total_text())
         self.mini_total_label.setObjectName("MiniStatValue")
-        mini_session_row.addWidget(self.mini_total_label)
-        mini_session_row.addStretch(1)
-        mini_stats_layout.addLayout(mini_session_row)
+        mini_stats_layout.addWidget(self.mini_total_label, 0, 2, Qt.AlignLeft | Qt.AlignVCenter)
 
+        self.mini_prediction_title = QLabel("PREDICTED SCRAP")
+        self.mini_prediction_title.setObjectName("MiniPredictionTitle")
+        self.mini_prediction_title.setVisible(False)
+        mini_stats_layout.addWidget(self.mini_prediction_title, 1, 0, 1, 2, Qt.AlignRight | Qt.AlignVCenter)
         self.mini_prediction_label = QLabel(self.get_mini_prediction_text())
         self.mini_prediction_label.setObjectName("MiniPredictionValue")
-        mini_stats_layout.addWidget(self.mini_prediction_label)
+        self.mini_prediction_label.setVisible(False)
+        mini_stats_layout.addWidget(self.mini_prediction_label, 1, 2, Qt.AlignLeft | Qt.AlignVCenter)
         layout.addWidget(mini_stats, 1)
 
         self.mini_pin_button = QPushButton("PIN")
@@ -3481,9 +3511,9 @@ class MainWindow(QMainWindow):
         self.topbar.hide()
         self.body.hide()
         self.mini_bar.show()
-        self.setMinimumSize(360, 52)
-        self.setMaximumSize(460, 52)
-        self.resize(410, 52)
+        self.setMinimumSize(305, 52)
+        self.setMaximumSize(420, 52)
+        self.resize(365, 52)
         self.apply_saved_mini_geometry()
         self.show()
         QTimer.singleShot(0, self.apply_saved_mini_geometry)
@@ -3628,6 +3658,12 @@ class MainWindow(QMainWindow):
             self.mini_bar.style().unpolish(self.mini_bar)
             self.mini_bar.style().polish(self.mini_bar)
         self.refresh_mini_stats_labels()
+
+    def get_current_app_session_seconds(self):
+        return max(0.0, time.time() - float(self.current_app_session_started_at or time.time()))
+
+    def get_total_app_open_time_seconds(self):
+        return self.total_app_open_time_seconds + self.get_current_app_session_seconds()
 
     def get_total_search_time_seconds(self):
         if self.rain_running and self.current_session_started_at is not None:
@@ -3968,6 +4004,8 @@ class MainWindow(QMainWindow):
 
     def get_current_stats(self):
         return {
+            "total_app_open_time_seconds": round(self.get_total_app_open_time_seconds(), 1),
+            "current_app_session_seconds": round(self.get_current_app_session_seconds(), 1),
             "total_search_time_seconds": round(self.get_total_search_time_seconds(), 1),
             "total_rains_clicked": int(self.total_rains_clicked),
             "total_rain_collected": round(self.total_rain_collected, 2),
@@ -4233,6 +4271,8 @@ class MainWindow(QMainWindow):
             self.reload_stats_page(scroll_value)
 
     def reset_stats(self):
+        self.total_app_open_time_seconds = 0.0
+        self.current_app_session_started_at = time.time()
         self.total_search_time_seconds = 0.0
         self.total_rains_clicked = 0
         self.total_rain_collected = 0.0
@@ -4313,6 +4353,8 @@ class MainWindow(QMainWindow):
             return
 
         self.saved_data["stats"] = stats
+        self.total_app_open_time_seconds = float(stats.get("total_app_open_time_seconds", 0.0) or 0.0)
+        self.current_app_session_started_at = time.time()
         self.total_search_time_seconds = float(stats.get("total_search_time_seconds", 0.0) or 0.0)
         self.total_rains_clicked = int(stats.get("total_rains_clicked", 0) or 0)
         self.total_rain_collected = float(stats.get("total_rain_collected", 0.0) or 0.0)
@@ -4718,9 +4760,14 @@ def apply_styles(app):
             font-size: 11px;
             font-weight: 900;
         }}
+        #MiniPredictionTitle {{
+            color: {COLORS["muted2"]};
+            font-size: 8px;
+            font-weight: 900;
+        }}
         #MiniPredictionValue {{
             color: {COLORS["green2"]};
-            font-size: 11px;
+            font-size: 10px;
             font-weight: 900;
         }}
         #MiniScrapIcon {{
@@ -4821,6 +4868,12 @@ def apply_styles(app):
             color: #f5dfce;
             font-size: 13px;
             font-weight: 900;
+        }}
+        #TopPredictionValue {{
+            color: {COLORS["green2"]};
+            font-size: 12px;
+            font-weight: 900;
+            padding-left: 8px;
         }}
         #ScrapIcon {{
             color: #f5dfce;
@@ -5089,6 +5142,7 @@ def apply_styles(app):
 
 
 def main():
+    legacy.set_windows_app_user_model_id()
     try:
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
         QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontCreateNativeWidgetSiblings, True)
@@ -5098,6 +5152,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setWindowIcon(get_app_icon())
     app.setFont(QFont("Segoe UI", 10))
     apply_palette(app)
     apply_styles(app)
