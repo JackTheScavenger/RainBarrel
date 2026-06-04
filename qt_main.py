@@ -89,7 +89,7 @@ from shiboken6 import isValid
 
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.2.4"
 BANDIT_CAMP_URL = "https://bandit.camp/"
 RAIN_REWARD_HISTORY_LIMIT = 100
 DEFAULT_CONFIDENCE_PERCENT = 70
@@ -689,6 +689,7 @@ class BrowserPage(QWidget):
     def __init__(self):
         super().__init__()
         self.loaded = False
+        self.browser_home_parent = self
 
         self.profile = QWebEngineProfile("RainBarrelBrowser", self)
         self.profile.setPersistentStoragePath(BROWSER_PROFILE_PATH)
@@ -703,10 +704,10 @@ class BrowserPage(QWidget):
         self.browser.setStyleSheet(f"background: {COLORS['bg']};")
         self.browser.setPage(self.page)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self.browser, 1)
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(0)
+        self.layout.addWidget(self.browser, 1)
 
     def ensure_loaded(self):
         if self.loaded:
@@ -716,6 +717,21 @@ class BrowserPage(QWidget):
     def load_home(self):
         self.loaded = True
         self.browser.setUrl(QUrl(BANDIT_CAMP_URL))
+
+    def move_browser_to(self, parent):
+        self.layout.removeWidget(self.browser)
+        self.browser.setParent(parent)
+        self.browser.show()
+
+    def restore_browser_home(self):
+        if self.browser.parent() is not self:
+            self.browser.setParent(self)
+        self.browser.setMinimumSize(0, 0)
+        self.browser.setMaximumSize(16777215, 16777215)
+        self.browser.move(0, 0)
+        if self.layout.indexOf(self.browser) < 0:
+            self.layout.addWidget(self.browser, 1)
+        self.browser.show()
 
 
 class BattlesPage(QWidget):
@@ -760,6 +776,11 @@ class BattlesPage(QWidget):
 class LogsPage(QWidget):
     def __init__(self, developer_mode_callback=None):
         super().__init__()
+        self.developer_mode = False
+        self.entries = []
+        self.initial_message = (
+            "[--] Normal logs show major rain events. Enable Developer Mode for detailed diagnostics."
+        )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(28, 24, 28, 18)
         layout.setSpacing(12)
@@ -780,16 +801,30 @@ class LogsPage(QWidget):
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setObjectName("LogBox")
-        self.log_box.setText(
-            "[--] Rain controls, weather station, reward tracking, result tracking, and battle logs are combined here."
-        )
+        self.log_box.setText(self.initial_message)
 
         layout.addLayout(header)
         layout.addWidget(self.log_box, 1)
 
-    def log(self, source, message):
+    def set_developer_mode(self, enabled):
+        self.developer_mode = bool(enabled)
+        self.render_logs()
+
+    def render_logs(self):
+        lines = [self.initial_message]
+        for timestamp, source, message, dev_only in self.entries:
+            if dev_only and not self.developer_mode:
+                continue
+            lines.append(f"[{timestamp}] {source}: {message}")
+        self.log_box.setPlainText("\n".join(lines))
+        scrollbar = self.log_box.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def log(self, source, message, dev_only=False):
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_box.append(f"[{timestamp}] {source}: {message}")
+        self.entries.append((timestamp, source, message, bool(dev_only)))
+        if not dev_only or self.developer_mode:
+            self.log_box.append(f"[{timestamp}] {source}: {message}")
 
 
 class ActivityToggleButton(QPushButton):
@@ -907,7 +942,6 @@ class StatsPage(QWidget):
         export_callback=None,
         import_callback=None,
         reset_callback=None,
-        refresh_callback=None,
     ):
         super().__init__()
         self.data = data
@@ -927,7 +961,6 @@ class StatsPage(QWidget):
         header.addStretch(1)
 
         for text, callback in (
-            ("REFRESH", refresh_callback),
             ("EXPORT STATS", export_callback),
             ("IMPORT STATS", import_callback),
             ("RESET STATS", reset_callback),
@@ -1179,6 +1212,7 @@ class MainWindow(QMainWindow):
         self.nav_buttons = {}
         self.logo_button = None
         self.mini_logo_button = None
+        self.mini_join_clip = None
         self.rain_page_button = None
         self.rain_status_button = None
         self.battle_status_button = None
@@ -1189,6 +1223,9 @@ class MainWindow(QMainWindow):
         self.mini_prediction_title = None
         self.mini_prediction_label = None
         self.top_prediction_label = None
+        self.mini_join_check_pending = False
+        self.mini_join_view_visible = False
+        self.mini_join_browser_size = QSize(1280, 720)
         self.mini_mode = False
         self.mini_pinned = False
         self.mini_mode_normal_flags = self.windowFlags()
@@ -1325,6 +1362,7 @@ class MainWindow(QMainWindow):
         self.rain_tracking_started_at = None
         self.rain_tracking_watch_until = None
         self.rain_tracking_last_extend_log_at = 0
+        self.public_rain_found_last_at_by_source = {}
 
     def wait_for_popup_after_rain_and_click(self):
         wait_seconds = self.get_popup_after_rain_wait_seconds()
@@ -1962,6 +2000,13 @@ class MainWindow(QMainWindow):
                 self.rain_reward_next_check_at = time.time() + scan_interval
                 time.sleep(scan_interval)
             if run_id == self.rain_reward_tracker_run_id and last_detail:
+                self.ui_call(
+                    lambda detail=last_detail: self.log_rain(
+                        "Rain ended: reward amount not found "
+                        f"(not joined or reward popup missed; {detail})",
+                        public=True,
+                    )
+                )
                 self.bridge.log.emit(f"Rain reward tracker stopped: {last_detail}")
         finally:
             with self.rain_reward_lock:
@@ -2015,6 +2060,7 @@ class MainWindow(QMainWindow):
         self.rain_reward_history = self.rain_reward_history[-RAIN_REWARD_HISTORY_LIMIT:]
         self.last_action = f"Collected {format_rain_amount(amount)} scrap"
         self.save_stats()
+        self.log_rain(f"Rain ended: reward amount {format_rain_amount(amount)} scrap", public=True)
         self.log_rain(f"Tracked rain reward: {format_rain_amount(amount)} scrap")
         self.reload_stats_if_visible()
 
@@ -2047,6 +2093,15 @@ class MainWindow(QMainWindow):
         self.rain_result_history = self.rain_result_history[-RAIN_REWARD_HISTORY_LIMIT:]
         self.last_action = "Tracked rain result"
         self.save_stats()
+        self.log_rain(
+            "Rain ended: "
+            f"{item['people_joined']} people | "
+            f"tipped {format_optional_rain_amount(item['total_tipped'])}"
+            f"{'' if item['total_tipped_verified'] else ' (unverified)'} | "
+            f"collected {format_rain_amount(item['total_scrap_claimed'])} | "
+            f"you got {format_rain_amount(item['your_reward'])}",
+            public=True,
+        )
         self.log_rain(
             "Tracked rain result: "
             f"{item['people_joined']} people | "
@@ -2704,15 +2759,15 @@ class MainWindow(QMainWindow):
         self.bridge.call.emit(callback)
 
     def append_rain_log(self, message):
-        write_debug_log(message)
-        self.log_rain(message)
+        self.log_rain(message, dev_only=True)
 
-    def log_event(self, source, message):
+    def log_event(self, source, message, dev_only=False):
+        write_debug_log(f"{source}: {message}")
         if widget_is_alive(self.logs_page):
-            self.logs_page.log(source, message)
+            self.logs_page.log(source, message, dev_only=dev_only)
 
-    def log_rain(self, message):
-        self.log_event("Rain", message)
+    def log_rain(self, message, dev_only=True, public=False):
+        self.log_event("Rain", message, dev_only=(dev_only and not public))
 
     def log_battle(self, message):
         self.log_event("Battle", message)
@@ -2722,6 +2777,8 @@ class MainWindow(QMainWindow):
 
     def set_developer_mode(self, enabled):
         self.developer_mode = bool(enabled)
+        if widget_is_alive(self.logs_page):
+            self.logs_page.set_developer_mode(self.developer_mode)
         self.sync_developer_navigation()
         if not self.developer_mode and self.current_page == "Battles":
             self.show_page("Rain")
@@ -2829,6 +2886,12 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(8, 4, 8, 4)
         layout.setSpacing(6)
 
+        self.mini_join_clip = QFrame()
+        self.mini_join_clip.setObjectName("MiniJoinClip")
+        self.mini_join_clip.setFixedSize(168, 44)
+        self.mini_join_clip.setVisible(False)
+        layout.addWidget(self.mini_join_clip)
+
         self.mini_logo_button = BarrelLogoButton(
             lambda: None,
             fixed_size=QSize(48, 44),
@@ -2913,7 +2976,6 @@ class MainWindow(QMainWindow):
             export_callback=self.export_stats,
             import_callback=self.import_stats,
             reset_callback=self.reset_stats,
-            refresh_callback=lambda checked=False: self.reload_stats_page(),
         )
 
     def show_page(self, page):
@@ -3511,9 +3573,9 @@ class MainWindow(QMainWindow):
         self.topbar.hide()
         self.body.hide()
         self.mini_bar.show()
-        self.setMinimumSize(305, 52)
-        self.setMaximumSize(420, 52)
-        self.resize(365, 52)
+        self.update_mini_mode_width()
+        if not self.mini_join_view_visible:
+            self.resize(365, 52)
         self.apply_saved_mini_geometry()
         self.show()
         QTimer.singleShot(0, self.apply_saved_mini_geometry)
@@ -3521,12 +3583,14 @@ class MainWindow(QMainWindow):
         self.sync_battle_running_state()
         self.sync_mini_pin_state()
         self.refresh_mini_stats_labels()
+        self.sync_barrel_logo_state()
 
     def exit_mini_mode(self):
         if not self.mini_mode:
             return
 
         self.save_mini_window_position()
+        self.hide_mini_join_view()
         self.mini_mode = False
         geometry = self.geometry()
         self.setWindowFlag(Qt.FramelessWindowHint, False)
@@ -3658,6 +3722,132 @@ class MainWindow(QMainWindow):
             self.mini_bar.style().unpolish(self.mini_bar)
             self.mini_bar.style().polish(self.mini_bar)
         self.refresh_mini_stats_labels()
+        self.sync_mini_join_view()
+
+    def get_mini_join_browser_size(self):
+        browser_size = self.browser_page.browser.size()
+        width = max(1000, browser_size.width(), self.width())
+        height = max(650, browser_size.height())
+        return QSize(width, height)
+
+    def sync_mini_join_view(self):
+        if not self.mini_mode or not self.rain_event_visually_active():
+            self.hide_mini_join_view()
+            return
+        if self.mini_join_check_pending or not widget_is_alive(self.mini_join_clip):
+            return
+
+        self.browser_page.ensure_loaded()
+        self.mini_join_check_pending = True
+        script = """
+            (() => {
+                const norm = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+                const markers = ["join rain event", "claim rain", "collect rain"];
+                const selector = "button, a, [role='button'], [class*='button'], [class*='Button'], div, span";
+                const candidates = [];
+                for (const element of Array.from(document.querySelectorAll(selector))) {
+                    const text = norm(element.innerText || element.textContent);
+                    if (!text || text.length > 80) {
+                        continue;
+                    }
+                    const lower = text.toLowerCase();
+                    if (!markers.some((marker) => lower === marker || lower.includes(marker))) {
+                        continue;
+                    }
+                    const rect = element.getBoundingClientRect();
+                    if (rect.width < 20 || rect.height < 14) {
+                        continue;
+                    }
+                    candidates.push({
+                        text,
+                        tag: String(element.tagName || ""),
+                        x: rect.left,
+                        y: rect.top,
+                        width: rect.width,
+                        height: rect.height
+                    });
+                }
+                candidates.sort((a, b) => {
+                    const aButton = /^(BUTTON|A)$/i.test(a.tag) ? 0 : 1;
+                    const bButton = /^(BUTTON|A)$/i.test(b.tag) ? 0 : 1;
+                    return aButton - bButton || b.width * b.height - a.width * a.height;
+                });
+                return JSON.stringify(candidates[0] || null);
+            })()
+        """
+        try:
+            self.browser_page.page.runJavaScript(script, self.handle_mini_join_button_rect)
+        except RuntimeError:
+            self.mini_join_check_pending = False
+            self.hide_mini_join_view()
+
+    def handle_mini_join_button_rect(self, result):
+        self.mini_join_check_pending = False
+        if not self.mini_mode or not self.rain_event_visually_active():
+            self.hide_mini_join_view()
+            return
+        try:
+            rect = json.loads(result) if isinstance(result, str) else None
+        except json.JSONDecodeError:
+            rect = None
+        if not isinstance(rect, dict):
+            self.hide_mini_join_view()
+            return
+        try:
+            x = float(rect.get("x"))
+            y = float(rect.get("y"))
+            width = float(rect.get("width"))
+            height = float(rect.get("height"))
+        except (TypeError, ValueError):
+            self.hide_mini_join_view()
+            return
+        if width < 20 or height < 14:
+            self.hide_mini_join_view()
+            return
+        self.show_mini_join_view(x, y, width, height)
+
+    def show_mini_join_view(self, button_x, button_y, button_width, button_height):
+        if not widget_is_alive(self.mini_join_clip):
+            return
+
+        browser_size = self.get_mini_join_browser_size()
+        self.mini_join_browser_size = browser_size
+        if self.browser_page.browser.parent() is not self.mini_join_clip:
+            self.browser_page.move_browser_to(self.mini_join_clip)
+
+        self.browser_page.browser.setMinimumSize(browser_size)
+        self.browser_page.browser.setMaximumSize(browser_size)
+        self.browser_page.browser.resize(browser_size)
+
+        clip_width = self.mini_join_clip.width()
+        clip_height = self.mini_join_clip.height()
+        offset_x = int(round(-button_x + max(8, (clip_width - button_width) / 2)))
+        offset_y = int(round(-button_y + max(2, (clip_height - button_height) / 2)))
+        self.browser_page.browser.move(offset_x, offset_y)
+        self.browser_page.browser.show()
+        self.mini_join_clip.setVisible(True)
+        self.mini_join_view_visible = True
+        self.update_mini_mode_width()
+
+    def hide_mini_join_view(self):
+        if self.mini_join_view_visible or self.browser_page.browser.parent() is self.mini_join_clip:
+            self.browser_page.restore_browser_home()
+        if widget_is_alive(self.mini_join_clip):
+            self.mini_join_clip.setVisible(False)
+        self.mini_join_view_visible = False
+        self.update_mini_mode_width()
+
+    def update_mini_mode_width(self):
+        if not self.mini_mode:
+            return
+        if self.mini_join_view_visible:
+            minimum, maximum, current = 485, 600, 540
+        else:
+            minimum, maximum, current = 305, 420, 365
+        self.setMinimumSize(minimum, 52)
+        self.setMaximumSize(maximum, 52)
+        if self.width() < minimum or self.width() > maximum:
+            self.resize(current, 52)
 
     def get_current_app_session_seconds(self):
         return max(0.0, time.time() - float(self.current_app_session_started_at or time.time()))
@@ -4116,12 +4306,22 @@ class MainWindow(QMainWindow):
         self.log_rain("Stopped" if trigger == "manual" else f"Stopped by {trigger}")
 
     def record_rain_detected(self, source):
+        now = time.time()
         self.last_rain_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.last_action = f"Rain detected by {source}"
         self.rain_visual_active_until = max(
             self.rain_visual_active_until,
-            time.time() + self.get_rain_tracker_watch_seconds(),
+            now + self.get_rain_tracker_watch_seconds(),
         )
+        source_label = {
+            "normal tracker": "rain clicker",
+            "rain clicker": "rain clicker",
+            "weather station": "Weather Station",
+        }.get(str(source).lower(), source)
+        last_public_log_at = self.public_rain_found_last_at_by_source.get(source_label, 0)
+        if now - last_public_log_at >= 240:
+            self.public_rain_found_last_at_by_source[source_label] = now
+            self.log_rain(f"Rain found through {source_label}", public=True)
         self.sync_barrel_logo_state()
         self.save_stats()
 
@@ -4171,6 +4371,7 @@ class MainWindow(QMainWindow):
                     self.current_session_rains_clicked += 1
                     self.last_action = "Clicked rain join button"
                     self.ui_call(self.save_stats)
+                    self.ui_call(lambda: self.log_rain("Rain clicked through auto clicker", public=True))
                     self.bridge.log.emit("Clicked rain join button")
                     self.start_rain_trackers("rain clicker")
                     self.wait_for_popup_after_rain_and_click()
@@ -4738,6 +4939,11 @@ def apply_styles(app):
             background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #241807, stop:0.52 #111109, stop:1 #241807);
             border: 2px solid {COLORS["gold"]};
             border-radius: 6px;
+        }}
+        #MiniJoinClip {{
+            background: #090705;
+            border: 1px solid {COLORS["gold"]};
+            border-radius: 5px;
         }}
         #MiniTitle {{
             color: {COLORS["red2"]};

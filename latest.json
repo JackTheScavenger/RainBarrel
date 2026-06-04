@@ -1,6 +1,6 @@
 {
-  "version": "1.2.3",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.2.3/RainBarrel.exe",
-  "sha256": "5440c8bbc0b1c17a51e8cca88128c7517f75d14155468c92fb939b77998e650e",
-  "notes": "Revamped the stats page with all-time and session summaries, fixed hourly chart rounding, suppressed duplicate Weather Station alerts for a single rain, removed mini Rain/Battles buttons, fixed the taskbar icon, and improved predicted rain display in full and mini modes."
+  "version": "1.2.4",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.2.4/RainBarrel.exe",
+  "sha256": "874a9b8794b3f496c45822223b17afcb07d24b9d59f588020cc477a7542f3e31",
+  "notes": "Cleaned up normal logs while keeping detailed diagnostics in Developer Mode, removed the Stats refresh button, and added the real clipped Bandit join-rain button to mini mode with improved sizing."
 }
