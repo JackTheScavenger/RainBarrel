@@ -89,7 +89,7 @@ from shiboken6 import isValid
 
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.2.5"
+APP_VERSION = "1.2.6"
 BANDIT_CAMP_URL = "https://bandit.camp/"
 RAIN_REWARD_HISTORY_LIMIT = 100
 DEFAULT_CONFIDENCE_PERCENT = 70
@@ -2935,9 +2935,23 @@ class MainWindow(QMainWindow):
         mini_button.clicked.connect(self.enter_mini_mode)
         layout.addWidget(mini_button)
 
+        version_block = QFrame()
+        version_block.setObjectName("VersionBlock")
+        version_layout = QVBoxLayout(version_block)
+        version_layout.setContentsMargins(0, 0, 0, 0)
+        version_layout.setSpacing(1)
+
         version = QLabel(f"Version {APP_VERSION}")
         version.setObjectName("VersionLabel")
-        layout.addWidget(version)
+        version.setAlignment(Qt.AlignCenter)
+        version_layout.addWidget(version)
+
+        update_button = QPushButton("CHECK")
+        update_button.setObjectName("UpdateCheckButton")
+        update_button.setCursor(Qt.PointingHandCursor)
+        update_button.clicked.connect(lambda checked=False: self.check_for_updates(silent=False))
+        version_layout.addWidget(update_button)
+        layout.addWidget(version_block)
 
         return topbar
 
@@ -5250,6 +5264,31 @@ def apply_styles(app):
         #VersionLabel, #MutedLabel {{
             color: {COLORS["muted"]};
             font-weight: 700;
+        }}
+        #VersionBlock {{
+            min-width: 70px;
+            max-width: 82px;
+        }}
+        #UpdateCheckButton {{
+            color: {COLORS["muted"]};
+            background: #141812;
+            border: 1px solid #2c3328;
+            border-radius: 7px;
+            padding: 1px 8px;
+            min-height: 17px;
+            max-height: 17px;
+            font-size: 9px;
+            font-weight: 900;
+        }}
+        #UpdateCheckButton:hover {{
+            color: #ffffff;
+            background: #20261d;
+            border-color: {COLORS["gold"]};
+        }}
+        #UpdateCheckButton:pressed {{
+            color: #111111;
+            background: {COLORS["gold"]};
+            border-color: #f1c24a;
         }}
         #SideTitle, #SectionTitle {{
             color: {COLORS["red2"]};

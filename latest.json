@@ -1,6 +1,6 @@
 {
-  "version": "1.2.5",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.2.5/RainBarrel.exe",
-  "sha256": "bbe2b9e5c5c30cbaa70a75e482659722c1b9b51f7bf86ac15bff0e66cd9b0e42",
-  "notes": "Fixed rain-active state lasting too long, prevented the same weather-station rain from retriggering alerts or extending trackers, and cleared the active rain display when reward or result tracking finishes."
+  "version": "1.2.6",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.2.6/RainBarrel.exe",
+  "sha256": "ef1ac14581993bd67e516ac67646477ae1e33b8c6b020c45cf44c77940169a3d",
+  "notes": "Added a small manual Check for Updates button under the version label in the top bar."
 }
