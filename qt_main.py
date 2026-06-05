@@ -89,7 +89,7 @@ from shiboken6 import isValid
 
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.2.4"
+APP_VERSION = "1.2.5"
 BANDIT_CAMP_URL = "https://bandit.camp/"
 RAIN_REWARD_HISTORY_LIMIT = 100
 DEFAULT_CONFIDENCE_PERCENT = 70
@@ -1293,6 +1293,9 @@ class MainWindow(QMainWindow):
         self.weather_station_last_state = None
         self.weather_station_active_rain_notified = False
         self.weather_station_last_alert_at = 0.0
+        self.weather_station_current_rain_key = None
+        self.weather_station_rain_active_until = 0.0
+        self.weather_station_seen_rain_keys = {}
         self.weather_station_status = "Weather station off"
         self.weather_station_started_at = None
         self.weather_station_next_check_at = None
@@ -1473,7 +1476,6 @@ class MainWindow(QMainWindow):
             self.rain_tracking_source = source
             self.rain_tracking_started_at = now
             self.rain_tracking_watch_until = now + watch_seconds
-            self.rain_visual_active_until = max(self.rain_visual_active_until, self.rain_tracking_watch_until)
 
             self.rain_tip_tracker_run_id += 1
             tip_run_id = self.rain_tip_tracker_run_id
@@ -2062,6 +2064,7 @@ class MainWindow(QMainWindow):
         self.save_stats()
         self.log_rain(f"Rain ended: reward amount {format_rain_amount(amount)} scrap", public=True)
         self.log_rain(f"Tracked rain reward: {format_rain_amount(amount)} scrap")
+        self.mark_rain_visual_finished()
         self.reload_stats_if_visible()
 
     def record_rain_result(self, summary, your_reward):
@@ -2119,7 +2122,7 @@ class MainWindow(QMainWindow):
             f"collected={format_rain_amount(item['total_scrap_claimed'])} | "
             f"reward={format_rain_amount(item['your_reward'])}"
         )
-        self.refresh_rain_prediction_labels()
+        self.mark_rain_visual_finished()
         self.reload_stats_if_visible()
 
     def remove_matching_rain_reward_for_result(self, result_item):
@@ -2255,6 +2258,9 @@ class MainWindow(QMainWindow):
         self.weather_station_last_state = None
         self.weather_station_active_rain_notified = False
         self.weather_station_last_alert_at = 0.0
+        self.weather_station_current_rain_key = None
+        self.weather_station_rain_active_until = 0.0
+        self.weather_station_seen_rain_keys = {}
         self.stop_weather_station_timer()
         driver = self.weather_station_driver
         self.weather_station_driver = None
@@ -2280,6 +2286,9 @@ class MainWindow(QMainWindow):
         self.weather_station_last_state = None
         self.weather_station_active_rain_notified = False
         self.weather_station_last_alert_at = 0.0
+        self.weather_station_current_rain_key = None
+        self.weather_station_rain_active_until = 0.0
+        self.weather_station_seen_rain_keys = {}
         self.stop_weather_station_timer()
         driver = self.weather_station_driver
         self.weather_station_driver = None
@@ -2296,6 +2305,9 @@ class MainWindow(QMainWindow):
     def start_weather_station(self):
         self.weather_station_last_state = None
         self.weather_station_active_rain_notified = False
+        self.weather_station_current_rain_key = None
+        self.weather_station_rain_active_until = 0.0
+        self.weather_station_seen_rain_keys = {}
         self.browser_page.ensure_loaded()
         self.log_rain("Weather station using built-in browser page text")
         self.schedule_weather_station_check(0)
@@ -2495,6 +2507,7 @@ class MainWindow(QMainWindow):
         hidden_scan = bool(payload.get("hiddenScan"))
         candidate_count = int(payload.get("candidateCount", 0) or 0)
         page_lower = page_text.lower()
+        rain_active_until = None
 
         if not href:
             detail = "Built-in browser has no loaded page yet"
@@ -2518,6 +2531,7 @@ class MainWindow(QMainWindow):
                 parts.append(f"button {button_text}")
             if remaining is not None:
                 parts.append(f"{remaining}s remaining")
+                rain_active_until = time.time() + max(0, remaining) + 2
             if tip_amount is not None:
                 with self.rain_tracking_lock:
                     self.pending_rain_total_tipped = round(float(tip_amount), 2)
@@ -2541,7 +2555,7 @@ class MainWindow(QMainWindow):
             state = False
             detail = f"No visible active Rakeback Rain join button found (candidates {candidate_count})"
 
-        self.report_weather_station_result(state, detail, notification_key)
+        self.report_weather_station_result(state, detail, notification_key, rain_active_until)
 
         delay = self.get_weather_rain_found_cooldown_seconds() if state is True else clamp_int(
             self.settings.get("weather_station_interval"),
@@ -2577,8 +2591,28 @@ class MainWindow(QMainWindow):
             f"Weather station turned off: {error.__class__.__name__}",
         )
 
-    def report_weather_station_result(self, state, detail, notification_key=None):
+    def cleanup_seen_weather_rain_keys(self, now=None):
+        now = time.time() if now is None else now
+        self.weather_station_seen_rain_keys = {
+            key: expires_at
+            for key, expires_at in self.weather_station_seen_rain_keys.items()
+            if float(expires_at or 0.0) > now
+        }
+
+    def report_weather_station_result(self, state, detail, notification_key=None, active_until=None):
         now = time.time()
+        self.cleanup_seen_weather_rain_keys(now)
+        seen_key_active = (
+            notification_key is not None
+            and float(self.weather_station_seen_rain_keys.get(notification_key, 0.0) or 0.0) > now
+        )
+        current_key_active = (
+            notification_key is not None
+            and notification_key == self.weather_station_current_rain_key
+        )
+        if state is True and seen_key_active and not current_key_active:
+            state = False
+            detail = f"Ignored already handled rain key ({notification_key})"
         timestamp = legacy.format_time_12h()
         if state is True:
             status = f"Rain active as of {timestamp}"
@@ -2594,23 +2628,53 @@ class MainWindow(QMainWindow):
             self.weather_station_last_state = state
             self.log_rain(f"Weather station: {detail}")
         if state is not True:
-            if now - float(self.weather_station_last_alert_at or 0.0) >= WEATHER_DUPLICATE_ALERT_SUPPRESS_SECONDS:
-                self.weather_station_active_rain_notified = False
+            self.weather_station_active_rain_notified = False
+            self.weather_station_current_rain_key = None
+            self.weather_station_rain_active_until = 0.0
+            self.sync_barrel_logo_state()
+            return
+
+        if active_until is not None:
+            try:
+                parsed_active_until = float(active_until)
+            except (TypeError, ValueError):
+                parsed_active_until = 0.0
+            if parsed_active_until > now:
+                self.weather_station_rain_active_until = parsed_active_until
+        elif now >= float(self.weather_station_rain_active_until or 0.0):
+            self.weather_station_rain_active_until = now + min(
+                30,
+                self.get_weather_rain_found_cooldown_seconds(),
+            )
+
         if (
             state is True
             and notification_key is not None
             and not self.weather_station_active_rain_notified
+            and not seen_key_active
         ):
-            self.record_rain_detected("weather station")
+            self.weather_station_current_rain_key = notification_key
+            self.record_rain_detected(
+                "weather station",
+                active_until=self.weather_station_rain_active_until,
+                update_visual=False,
+            )
             self.start_rain_trackers("weather station")
             self.total_weather_notifications += 1
             self.current_weather_session_notifications += 1
             self.weather_station_active_rain_notified = True
             self.weather_station_last_alert_at = now
             self.last_weather_notification_key = notification_key
+            self.weather_station_seen_rain_keys[notification_key] = now + max(
+                600,
+                self.get_weather_rain_found_cooldown_seconds() + self.get_rain_tracker_watch_seconds(),
+            )
             self.save_stats()
             self.log_rain(f"Weather station: rain alert triggered ({notification_key})")
             self.play_weather_notification_sound()
+        elif notification_key is not None and notification_key == self.weather_station_current_rain_key:
+            self.weather_station_active_rain_notified = True
+        self.sync_barrel_logo_state()
 
     def weather_station_worker(self, run_id):
         self.bridge.log.emit("Weather station worker started")
@@ -2719,8 +2783,15 @@ class MainWindow(QMainWindow):
                     shutdown_status, shutdown_log = self.get_weather_station_shutdown_messages(e)
                     break
 
+                rain_active_until = (
+                    rain_active_until_ms / 1000
+                    if state is True and rain_active_until_ms > int(time.time() * 1000)
+                    else None
+                )
                 self.ui_call(
-                    lambda s=state, d=detail, k=rain_notification_key: self.report_weather_station_result(s, d, k)
+                    lambda s=state, d=detail, k=rain_notification_key, a=rain_active_until: (
+                        self.report_weather_station_result(s, d, k, a)
+                    )
                 )
 
                 delay = self.get_weather_rain_found_cooldown_seconds() if state is True else clamp_int(
@@ -3696,17 +3767,11 @@ class MainWindow(QMainWindow):
 
     def rain_event_visually_active(self):
         now = time.time()
-        if self.weather_station_last_state is True:
+        if now < float(self.weather_station_rain_active_until or 0.0):
             return True
         if now < float(self.rain_visual_active_until or 0):
             return True
-        if now < self.get_rain_tracking_watch_until():
-            return True
-        return (
-            self.rain_tip_tracker_active
-            or self.rain_reward_tracker_active
-            or self.rain_result_tracker_active
-        )
+        return False
 
     def sync_barrel_logo_state(self):
         active = self.rain_event_visually_active()
@@ -3723,6 +3788,14 @@ class MainWindow(QMainWindow):
             self.mini_bar.style().polish(self.mini_bar)
         self.refresh_mini_stats_labels()
         self.sync_mini_join_view()
+
+    def mark_rain_visual_finished(self):
+        self.rain_visual_active_until = 0.0
+        self.weather_station_rain_active_until = 0.0
+        self.weather_station_current_rain_key = None
+        self.weather_station_active_rain_notified = False
+        self.sync_barrel_logo_state()
+        self.refresh_rain_prediction_labels()
 
     def get_mini_join_browser_size(self):
         browser_size = self.browser_page.browser.size()
@@ -4305,14 +4378,21 @@ class MainWindow(QMainWindow):
         self.sync_rain_running_state()
         self.log_rain("Stopped" if trigger == "manual" else f"Stopped by {trigger}")
 
-    def record_rain_detected(self, source):
+    def record_rain_detected(self, source, active_until=None, update_visual=True):
         now = time.time()
         self.last_rain_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.last_action = f"Rain detected by {source}"
-        self.rain_visual_active_until = max(
-            self.rain_visual_active_until,
-            now + self.get_rain_tracker_watch_seconds(),
-        )
+        if update_visual:
+            try:
+                parsed_active_until = float(active_until) if active_until is not None else 0.0
+            except (TypeError, ValueError):
+                parsed_active_until = 0.0
+            if parsed_active_until <= now:
+                parsed_active_until = now + self.get_rain_tracker_watch_seconds()
+            self.rain_visual_active_until = max(
+                self.rain_visual_active_until,
+                parsed_active_until,
+            )
         source_label = {
             "normal tracker": "rain clicker",
             "rain clicker": "rain clicker",

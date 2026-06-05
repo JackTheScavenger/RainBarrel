@@ -1,6 +1,6 @@
 {
-  "version": "1.2.4",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.2.4/RainBarrel.exe",
-  "sha256": "874a9b8794b3f496c45822223b17afcb07d24b9d59f588020cc477a7542f3e31",
-  "notes": "Cleaned up normal logs while keeping detailed diagnostics in Developer Mode, removed the Stats refresh button, and added the real clipped Bandit join-rain button to mini mode with improved sizing."
+  "version": "1.2.5",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.2.5/RainBarrel.exe",
+  "sha256": "bbe2b9e5c5c30cbaa70a75e482659722c1b9b51f7bf86ac15bff0e66cd9b0e42",
+  "notes": "Fixed rain-active state lasting too long, prevented the same weather-station rain from retriggering alerts or extending trackers, and cleared the active rain display when reward or result tracking finishes."
 }
