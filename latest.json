@@ -1,6 +1,6 @@
 {
-  "version": "1.2.6",
-  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.2.6/RainBarrel.exe",
-  "sha256": "ef1ac14581993bd67e516ac67646477ae1e33b8c6b020c45cf44c77940169a3d",
-  "notes": "Added a small manual Check for Updates button under the version label in the top bar."
+  "version": "1.2.7",
+  "url": "https://github.com/JackTheScavenger/RainBarrel/releases/download/v1.2.7/RainBarrel.exe",
+  "sha256": "0c4a37259b2c43bf21f81a622bc862307d9de7ed8f2ba116381e5fb6b7357304",
+  "notes": "Added a small manual Check for Updates button under the version label in the top bar and made update checks use the freshest GitHub manifest path."
 }

@@ -89,7 +89,7 @@ from shiboken6 import isValid
 
 
 APP_NAME = "RainBarrel"
-APP_VERSION = "1.2.6"
+APP_VERSION = "1.2.7"
 BANDIT_CAMP_URL = "https://bandit.camp/"
 RAIN_REWARD_HISTORY_LIMIT = 100
 DEFAULT_CONFIDENCE_PERCENT = 70
@@ -4670,8 +4670,16 @@ class MainWindow(QMainWindow):
     # ================= UPDATES =================
 
     def updates_are_configured(self):
-        manifest_url = getattr(legacy, "UPDATE_MANIFEST_URL", "")
+        manifest_url = self.get_update_manifest_url()
         return manifest_url.startswith("https://") and "YOUR_GITHUB_USERNAME" not in manifest_url
+
+    def get_update_manifest_url(self):
+        manifest_url = getattr(legacy, "UPDATE_MANIFEST_URL", "")
+        stale_raw_path = "https://raw.githubusercontent.com/JackTheScavenger/RainBarrel/main/latest.json"
+        fresh_raw_path = "https://raw.githubusercontent.com/JackTheScavenger/RainBarrel/refs/heads/main/latest.json"
+        if manifest_url == stale_raw_path:
+            return fresh_raw_path
+        return manifest_url
 
     def check_for_updates_on_startup(self):
         if self.updates_are_configured():
@@ -4692,7 +4700,7 @@ class MainWindow(QMainWindow):
 
     def update_check_worker(self, silent):
         try:
-            manifest_url = legacy.UPDATE_MANIFEST_URL
+            manifest_url = self.get_update_manifest_url()
             separator = "&" if "?" in manifest_url else "?"
             manifest_url = f"{manifest_url}{separator}_={int(time.time())}"
             request = urllib.request.Request(
